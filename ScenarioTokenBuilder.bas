@@ -53,6 +53,10 @@ Public Const KIND_CHART_NAMED As String = "ChartNamed"
 Public Const KIND_CHART_INLINE As String = "ChartInline"
 Public Const KIND_UNKNOWN As String = "Unknown"
 
+' Placeholder keys for the metric picker; see "Metric picker" below.
+Public Const METRIC_SOURCE_NAMED As String = "(named ranges)"
+Public Const METRIC_SEGMENT_NONE As String = "(no segment)"
+
 Public Type ParsedToken
     kind As String          ' one of the KIND_* constants
     metricId As String      ' for Metric / Current / Delta / DeltaPct / Label
@@ -366,10 +370,9 @@ End Function
 ' Metrics that don't fit that shape still get a place: named-range metrics sit under
 ' a "(named ranges)" source and use their metric ID as the type, and single-row tables
 ' with no label column use "(no segment)". The three Key functions are the only place
-' that mapping lives, so the lists and MetricIdFor can't disagree.
-
-Public Const METRIC_SOURCE_NAMED As String = "(named ranges)"
-Public Const METRIC_SEGMENT_NONE As String = "(no segment)"
+' that mapping lives, so the lists and MetricIdFor can't disagree. The two placeholder
+' constants (METRIC_SOURCE_NAMED, METRIC_SEGMENT_NONE) are declared at the top of the
+' module, since VBA won't accept module-level declarations after the first procedure.
 
 Public Function MetricSourceKey(m As MetricSpec) As String
     If Len(m.sourceTable) = 0 Then
