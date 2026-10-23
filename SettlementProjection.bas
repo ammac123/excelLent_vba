@@ -64,20 +64,10 @@ Private Const COL_IS_NEXT As String = "IsNextFY"
 
 Private mGompertzCache As Object
 
+' Button entry: rebuilds both tables and reports the outcome in a message box.
 Public Sub BuildSettlementProjection()
-    Dim loIn As ListObject
-    Dim data As Variant
-    Dim nRows As Long, nCols As Long
-    Dim colMonth As Long, colDays As Long, colCur As Long, colNext As Long
-    Dim segCols() As Long, segHeaders() As String, nSeg As Long
-    Dim appAnchor() As Date
-    Dim cohortFull() As Double, cohortBase() As Double
-    Dim outFull As Variant, outBase As Variant
-    Dim r As Long, m As Long, s As Long
-    Dim monthStart As Date, endOfM As Date, endOfPrev As Date
-    Dim dEnd As Double, dStart As Double, marginal As Double
-    Dim segRates() As Double
     Dim priorCalc As XlCalculation
+    Dim nRows As Long, nSeg As Long
     Dim stampedOn As Date
 
     On Error GoTo Failed
@@ -86,6 +76,54 @@ Public Sub BuildSettlementProjection()
     priorCalc = Application.Calculation
     Application.Calculation = xlCalculationManual
     Application.StatusBar = "Projecting settlements..."
+
+    stampedOn = ProjectSettlements(nRows, nSeg)
+
+    Application.StatusBar = False
+    Application.Calculation = priorCalc
+    Application.ScreenUpdating = True
+
+    MsgBox TBL_OUT & " and " & TBL_OUT_BASE & " rebuilt at " & _
+           Format$(stampedOn, "dd mmm yyyy hh:nn") & "." & vbNewLine & _
+           nRows & " settlement months x " & nSeg & " segments.", vbInformation
+    Exit Sub
+
+Failed:
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+    If priorCalc <> 0 Then Application.Calculation = priorCalc
+    MsgBox "Settlement projection failed:" & vbNewLine & Err.description, vbCritical
+End Sub
+
+' Scenario-run entry, called from ScenarioConfig.PrepareScenarioOutputs. Silent, and it
+' leaves calculation mode, screen updating and the status bar alone because the run's
+' BeginBatch guard owns them. Raises on failure so the run reports it against the
+' scenario instead of storing results from a stale projection.
+Public Sub RefreshSettlementProjection()
+    Dim nRows As Long, nSeg As Long
+
+    ProjectSettlements nRows, nSeg
+End Sub
+
+' Rebuilds both tables from tblProjAppUplift as it currently stands, so the caller must
+' have calculated the loaded inputs first. Returns the time stamped on the status, and
+' the table shape via nRows and nSeg.
+Private Function ProjectSettlements(ByRef nRows As Long, ByRef nSeg As Long) As Date
+    Dim loIn As ListObject
+    Dim data As Variant
+    Dim nCols As Long
+    Dim colMonth As Long, colDays As Long, colCur As Long, colNext As Long
+    Dim segCols() As Long, segHeaders() As String
+    Dim appAnchor() As Date
+    Dim cohortFull() As Double, cohortBase() As Double
+    Dim outFull As Variant, outBase As Variant
+    Dim r As Long, m As Long, s As Long
+    Dim monthStart As Date, endOfM As Date, endOfPrev As Date
+    Dim dEnd As Double, dStart As Double, marginal As Double
+    Dim segRates() As Double
+    Dim stampedOn As Date
+
+    On Error GoTo Failed
 
     Set loIn = RequireTable(TBL_IN)
     data = TableBody(loIn)
@@ -162,23 +200,14 @@ Public Sub BuildSettlementProjection()
     LastCalculatedOn(RECALC_KEY) = stampedOn
     WriteStatus stampedOn
 
-    Application.StatusBar = False
-    Application.Calculation = priorCalc
-    Application.ScreenUpdating = True
     Set mGompertzCache = Nothing
-
-    MsgBox TBL_OUT & " and " & TBL_OUT_BASE & " rebuilt at " & _
-           Format$(stampedOn, "dd mmm yyyy hh:nn") & "." & vbNewLine & _
-           nRows & " settlement months x " & nSeg & " segments.", vbInformation
-    Exit Sub
+    ProjectSettlements = stampedOn
+    Exit Function
 
 Failed:
-    Application.StatusBar = False
-    Application.ScreenUpdating = True
-    If priorCalc <> 0 Then Application.Calculation = priorCalc
     Set mGompertzCache = Nothing
-    MsgBox "Settlement projection failed:" & vbNewLine & Err.description, vbCritical
-End Sub
+    Err.Raise Err.Number, Err.Source, Err.description
+End Function
 
 ' Rows are matched between the two tables by Month normalised to the first of
 ' month; segments by column header name, so column order can differ. A row or

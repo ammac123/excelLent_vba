@@ -150,8 +150,15 @@ End Function
 ' Called after the model recalculates and before a run reads its metrics. Anything that
 ' builds an output table out of the loaded inputs has to be rebuilt here, otherwise the
 ' run captures the previous scenario's numbers.
+'
+' The settlement projection is written as values, and the metric tables calculate off
+' it, so the run is still in manual calculation with those dependents out of date.
+' Application.Calculate settles only what changed (plus volatiles), not the whole model
+' again.
 Public Sub PrepareScenarioOutputs()
     GenerateDiscretionSummary
+    RefreshSettlementProjection
+    Application.Calculate
 End Sub
 
 '=======================================================================================
