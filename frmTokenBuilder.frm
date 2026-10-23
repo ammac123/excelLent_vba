@@ -26,6 +26,13 @@ Private suppressRefresh As Boolean
 ' geometry and font: one row per pick, then the live value, then the format row.
 Private Const SEGMENT_ROW_STEP As Single = 22
 
+' MSForms list boxes drift when their contents are rebuilt: IntegralHeight snaps the
+' height to whole rows and display scaling compounds it, so the series lists jump
+' each time a source or baseline table is picked. The designed geometry is captured
+' on open and put back after every repopulate.
+Private seriesListBox As Variant
+Private baseSeriesListBox As Variant
+
 Private WithEvents cboSegmentId As MSForms.ComboBox
 Private WithEvents cboSegmentCol As MSForms.ComboBox
 Private lblSegmentId As MSForms.Label
@@ -460,6 +467,23 @@ Private Sub RefreshInlineColumnLists(baselineSide As Boolean)
             lstInlineBaseSeries.AddItem names(i)
         Next i
     End If
+    PinInlineLists
+End Sub
+
+Private Sub PinInlineLists()
+    RestoreBox lstInlineSeries, seriesListBox
+    RestoreBox lstInlineBaseSeries, baseSeriesListBox
+End Sub
+
+Private Function CaptureBox(ctl As Object) As Variant
+    CaptureBox = Array(ctl.Left, ctl.Top, ctl.Width, ctl.Height)
+End Function
+
+Private Sub RestoreBox(ctl As Object, box As Variant)
+    ctl.Left = box(0)
+    ctl.Top = box(1)
+    ctl.Width = box(2)
+    ctl.Height = box(3)
 End Sub
 
 Private Sub RebuildPreview()
@@ -622,6 +646,7 @@ Private Sub ClearInputs()
     lstInlineSeries.Clear
     cboInlineBase.ListIndex = -1
     lstInlineBaseSeries.Clear
+    PinInlineLists
     txtInlineTitle.text = ""
     txtInlineFormat.text = ""
     chkInlineLegend.Value = True
