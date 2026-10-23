@@ -209,6 +209,12 @@ Public Function CompareBlockGap() As Long
     CompareBlockGap = 1
 End Function
 
+' Fill for the highlight frame drawn on the ring of cells around each summary and output
+' template range. The frame sits outside the range, so it never reaches a rendered block.
+Public Function TemplateFrameColor() As Long
+    TemplateFrameColor = RGB(255, 230, 153)
+End Function
+
 '=======================================================================================
 ' Scenario output view
 '=======================================================================================

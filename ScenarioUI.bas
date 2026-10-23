@@ -57,10 +57,10 @@ Public Sub LoadScenarioButton()
     If Not ConfirmDiscardIfDirty("Load '" & ScenarioName(scenarioId) & "'") Then Exit Sub
 
     LoadScenario scenarioId
+    Application.CalculateFull
     RefreshScenarioManager
 
-    MsgBox "Loaded '" & ScenarioName(scenarioId) & "'." & vbNewLine & _
-           "Recalculate the model to see its results (Press F9).", vbInformation
+    MsgBox "Loaded '" & ScenarioName(scenarioId) & "'.", vbInformation
     Exit Sub
 
 Failed:
@@ -337,8 +337,28 @@ Failed:
     ReportFailure "redefine the output template range"
 End Sub
 
+' Re-frames every summary and output template where it stands. Run once to move templates
+' marked the old way (border on the range itself) over to the outside highlight frame.
+Public Sub RefreshTemplateFramesButton()
+    Dim skipped As String
+
+    On Error GoTo Failed
+    skipped = RefreshTemplateFrames()
+
+    If Len(skipped) = 0 Then
+        MsgBox "Every template range is framed.", vbInformation
+    Else
+        MsgBox "Framed the template ranges, except:" & vbNewLine & vbNewLine & skipped, _
+               vbExclamation
+    End If
+    Exit Sub
+
+Failed:
+    ReportFailure "refresh the template frames"
+End Sub
+
 ' Prompts for the new range for the template picked in the cmbRedefineTemplate dropdown,
-' moves the black border and the header label with it. A missing named range is created
+' moves the highlight frame and the header label with it. A missing named range is created
 ' on the fly so a deleted template range can be reinstated by picking it and selecting a
 ' rectangle.
 Public Sub RedefineTemplateRangeButton()
@@ -410,6 +430,8 @@ Public Sub RefreshScenarioManager()
 
     Set cell = NamedRangeOrNothing(NAME_STATUS)
     If Not cell Is Nothing Then cell.value = StatusText(scenarioId)
+
+    RefreshOutputScenarioPicker
 End Sub
 
 Private Function StatusText(scenarioId As String) As String

@@ -14,8 +14,8 @@ Option Explicit
 '                              CompareTemplates(). Each is a defined name over a block
 '                              laid out and formatted by hand.
 '   outputTemplatePicker       Cell holding the chosen template's label.
-'   outputScenarioPicker       Cell holding the scenario's display name. Empty, "Loaded"
-'                              or an unknown name falls back to the currently loaded
+'   outputScenarioPicker       Cell holding the scenario's display name. Empty, "Loaded
+'                              (<name>)" or an unknown name falls back to the currently loaded
 '                              scenario, so a user who hasn't thought about it still
 '                              gets what the model is calculating.
 '   outputAnchor               Top-left cell the block lands on.
@@ -168,7 +168,7 @@ End Sub
 
 ' Scenario ID the output should render. Order:
 '   1. The picker cell, if it names a saved scenario.
-'   2. The "Loaded" sentinel, or an empty cell, falls back to the active scenario.
+'   2. The "Loaded (...)" entry, or an empty cell, falls back to the active scenario.
 '   3. Fails silently (returns "") so the caller can message instead of crashing.
 Public Function ResolveOutputScenarioId() As String
     Dim cell As Range
@@ -178,7 +178,7 @@ Public Function ResolveOutputScenarioId() As String
     Set cell = NamedRangeOrNothing(OutputScenarioPickerName())
     If Not cell Is Nothing Then picked = Trim$(CStr(cell.value))
 
-    If Len(picked) > 0 And StrComp(picked, LOADED_SENTINEL, vbTextCompare) <> 0 Then
+    If Len(picked) > 0 And Not IsLoadedLabel(picked) Then
         id = ScenarioIdForName(picked)
         If Len(id) > 0 Then
             ResolveOutputScenarioId = id
@@ -189,19 +189,22 @@ Public Function ResolveOutputScenarioId() As String
     ResolveOutputScenarioId = ActiveScenarioIdVal()
 End Function
 
-' Rebuilds the picker's dropdown from the saved scenarios plus a "Loaded" sentinel that
-' means "whichever scenario is currently loaded." Called from the build button so adding
-' or renaming a scenario is picked up automatically.
+' Rebuilds the picker's dropdown from the saved scenarios plus a "Loaded (<name>)" entry
+' that means "whichever scenario is currently loaded." Called from the build button and
+' whenever the manager refreshes, so loading, adding or renaming a scenario is picked up
+' automatically.
 Public Sub RefreshOutputScenarioPicker()
     Dim cell As Range
     Dim ids As Variant
     Dim list As String
+    Dim loadedLabel As String
     Dim i As Long
 
     Set cell = NamedRangeOrNothing(OutputScenarioPickerName())
     If cell Is Nothing Then Exit Sub
 
-    list = LOADED_SENTINEL
+    loadedLabel = CurrentLoadedLabel()
+    list = loadedLabel
 
     ids = ScenarioIds()
     If UBound(ids) >= LBound(ids) Then
@@ -217,8 +220,35 @@ Public Sub RefreshOutputScenarioPicker()
         .InCellDropdown = True
     End With
 
-    If Len(Trim$(CStr(cell.value))) = 0 Then cell.value = LOADED_SENTINEL
+    ' An empty cell, or a "Loaded (...)" label naming whatever was loaded last time, is
+    ' brought up to date so the cell always names the scenario it will render.
+    If Len(Trim$(CStr(cell.value))) = 0 Or IsLoadedLabel(CStr(cell.value)) Then
+        cell.value = loadedLabel
+    End If
 End Sub
+
+' "Loaded (Base Case)", or plain "Loaded" when nothing is loaded.
+Private Function CurrentLoadedLabel() As String
+    Dim scenarioId As String
+
+    scenarioId = ActiveScenarioIdVal()
+    If Len(scenarioId) = 0 Then
+        CurrentLoadedLabel = LOADED_SENTINEL
+    Else
+        CurrentLoadedLabel = LOADED_SENTINEL & " (" & ScenarioName(scenarioId) & ")"
+    End If
+End Function
+
+' True for the bare sentinel and for any "Loaded (...)" label, including a stale one
+' that names a scenario which has since been unloaded or renamed.
+Private Function IsLoadedLabel(ByVal text As String) As Boolean
+    text = Trim$(text)
+    If StrComp(text, LOADED_SENTINEL, vbTextCompare) = 0 Then
+        IsLoadedLabel = True
+    Else
+        IsLoadedLabel = (LCase$(text) Like LCase$(LOADED_SENTINEL) & " (*)")
+    End If
+End Function
 
 '=======================================================================================
 ' Template picker
@@ -353,8 +383,9 @@ Public Function SelectedOutputRedefineTemplate() As CompareTemplateSpec
               "'" & picked & "' is not one of the configured output templates."
 End Function
 
-' Repoints the picked output template's named range at newRange, repaints the perimeter
-' border and the header label. A missing named range is created on the fly.
+' Repoints the picked output template's named range at newRange and moves the highlight
+' frame and header label with it (see ScenarioCompare's template range redefinition). A
+' missing named range is created on the fly.
 Public Sub RedefineSelectedOutputTemplateRange(ByVal newRange As Range)
     Dim chosen As CompareTemplateSpec
     Dim oldRange As Range
@@ -371,35 +402,19 @@ Public Sub RedefineSelectedOutputTemplateRange(ByVal newRange As Range)
         Err.Raise vbObjectError + 745, "ScenarioOutput", _
                   "The template range cannot start on row 1 because the label needs the row above it."
     End If
+    If Not TemplateFrameFits(newRange) Then
+        Err.Raise vbObjectError + 746, "ScenarioOutput", _
+                  "The template range needs a free cell on every side for its highlight " & _
+                  "frame, so it cannot start in column A or touch the sheet's last row or column."
+    End If
 
     chosen = SelectedOutputRedefineTemplate()
 
     Set oldRange = NamedRangeOrNothing(chosen.nameRef)
-    If Not oldRange Is Nothing Then ClearOutputTemplateMarkers oldRange, chosen.label
+    If Not oldRange Is Nothing Then ClearTemplateRangeMarkers oldRange, chosen.label
 
     newRange.Name = chosen.nameRef
-    MarkOutputTemplateRange newRange, chosen.label
-End Sub
-
-Private Sub ClearOutputTemplateMarkers(rng As Range, label As String)
-    Dim labelCell As Range
-
-    rng.Borders(xlEdgeTop).LineStyle = xlNone
-    rng.Borders(xlEdgeBottom).LineStyle = xlNone
-    rng.Borders(xlEdgeLeft).LineStyle = xlNone
-    rng.Borders(xlEdgeRight).LineStyle = xlNone
-
-    If rng.Row > 1 Then
-        Set labelCell = rng.Cells(1, 1).Offset(-1, 0)
-        If StrComp(Trim$(CStr(labelCell.value)), label, vbTextCompare) = 0 Then
-            labelCell.ClearContents
-        End If
-    End If
-End Sub
-
-Private Sub MarkOutputTemplateRange(rng As Range, label As String)
-    rng.BorderAround LineStyle:=xlContinuous, Weight:=xlThick, Color:=vbBlack
-    rng.Cells(1, 1).Offset(-1, 0).value = label
+    MarkTemplateRange newRange, chosen.label
 End Sub
 
 Private Function FindShapeAnywhere(shapeName As String) As Shape

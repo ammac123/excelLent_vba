@@ -13,40 +13,32 @@ Option Explicit
 '
 ' What counts as a metric is decided entirely by ScenarioMetrics: this module only
 ' recalculates, reads the included metrics and stores them.
- 
-' Refreshes the current-state baseline. Independent of whatever scenario is loaded:
-' recalculates the current-state calc sheets, reads metrics from their parallel output
-' tables (declared in ScenarioConfig's MetricSourceTables) and stores them in
-' tblScenarioResults under the reserved CURRENT ScenarioID. Nothing in the active
-' scenario is touched.
+'
+' Every run also refreshes the current-state baseline, once per click, so {Current.X},
+' {Delta.X} and chart baselines are never older than the scenarios they are compared
+' against. RunCurrentState is still there for refreshing the baseline on its own.
+
+' Refreshes the current-state baseline on its own, without running any scenario.
 Public Sub RunCurrentState()
-    Dim recalcs() As RecalcSpec
     Dim metrics() As MetricSpec
-    Dim currentId As String
     Dim guard As CalcGuard
-    Dim i As Long
+    Dim failure As String
 
     On Error GoTo Failed
 
-    currentId = CurrentStateScenarioId()
-    EnsureCurrentStateRow
+    metrics = IncludedMetricSpecs()
 
     guard = BeginBatch("Refreshing the current state...")
-
-    recalcs = CurrentStateRecalcs()
-    For i = LBound(recalcs) To UBound(recalcs)
-        RecalcSheetInline recalcs(i)
-    Next i
-
-    Application.CalculateFull
-    metrics = IncludedMetricSpecs()
-    StoreResults currentId, ReadMetricValuesForCurrentState(metrics)
-    LastCalculatedOn(currentId) = Now
-
+    failure = RefreshCurrentState(metrics)
     EndBatch guard
 
     RefreshScenarioManager
-    MsgBox "Refreshed the current state and stored its results.", vbInformation
+    If Len(failure) = 0 Then
+        MsgBox "Refreshed the current state and stored its results.", vbInformation
+    Else
+        MsgBox "The current-state refresh did not complete." & vbNewLine & vbNewLine & _
+               failure, vbCritical
+    End If
     Exit Sub
 
 Failed:
@@ -54,6 +46,39 @@ Failed:
     MsgBox "The current-state refresh did not complete." & vbNewLine & vbNewLine & _
            Err.description, vbCritical
 End Sub
+
+' Independent of whatever scenario is loaded: recalculates the current-state calc
+' sheets, reads metrics from their parallel output tables (declared in ScenarioConfig's
+' MetricSourceTables) and stores them in tblScenarioResults under the reserved CURRENT
+' ScenarioID. Nothing in the active scenario is touched. The caller must already be
+' inside a BeginBatch guard.
+'
+' Returns "" on success or a line describing the failure, so a run that calls this can
+' report a broken baseline without losing the scenario results it already stored.
+Private Function RefreshCurrentState(metrics() As MetricSpec) As String
+    Dim recalcs() As RecalcSpec
+    Dim currentId As String
+    Dim i As Long
+
+    On Error GoTo Failed
+
+    Application.StatusBar = "Refreshing the current state..."
+    currentId = CurrentStateScenarioId()
+    EnsureCurrentStateRow
+
+    recalcs = CurrentStateRecalcs()
+    For i = LBound(recalcs) To UBound(recalcs)
+        RecalcSheetInline recalcs(i)
+    Next i
+
+    Application.CalculateFull
+    StoreResults currentId, ReadMetricValuesForCurrentState(metrics)
+    LastCalculatedOn(currentId) = Now
+    Exit Function
+
+Failed:
+    RefreshCurrentState = "- " & CurrentStateScenarioName() & ": " & Err.description & vbNewLine
+End Function
 
 ' Recalculates one sheet without the status cell / message-box plumbing of RunRecalc.
 ' The caller is already inside a BeginBatch guard and will show its own summary.
@@ -79,12 +104,14 @@ Private Sub RecalcSheetInline(spec As RecalcSpec)
     ws.EnableCalculation = False
 End Sub
 
-' Recalculates the loaded scenario and stores its metrics, leaving it loaded.
+' Recalculates the loaded scenario and stores its metrics, leaving it loaded, then
+' refreshes the current state.
 Public Sub RunActiveScenario()
     Dim scenarioId As String
     Dim problem As String
     Dim metrics() As MetricSpec
     Dim guard As CalcGuard
+    Dim baselineFailure As String
  
     On Error GoTo Failed
  
@@ -111,10 +138,18 @@ Public Sub RunActiveScenario()
     metrics = IncludedMetricSpecs()
     StoreResults scenarioId, ReadMetricValues(metrics)
     LastCalculatedOn(scenarioId) = Now
+    baselineFailure = RefreshCurrentState(metrics)
     EndBatch guard
- 
+
     RefreshScenarioManager
-    MsgBox "Ran '" & ScenarioName(scenarioId) & "' and stored its results.", vbInformation
+    If Len(baselineFailure) = 0 Then
+        MsgBox "Ran '" & ScenarioName(scenarioId) & "' and refreshed the current state.", _
+               vbInformation
+    Else
+        MsgBox "Ran '" & ScenarioName(scenarioId) & "' and stored its results, but the " & _
+               "current state could not be refreshed:" & vbNewLine & vbNewLine & _
+               baselineFailure, vbExclamation
+    End If
     Exit Sub
  
 Failed:
@@ -122,7 +157,8 @@ Failed:
     MsgBox "The scenario run did not complete." & vbNewLine & vbNewLine & Err.description, vbCritical
 End Sub
  
-' Runs every scenario flagged Include_In_Run, then restores whatever was loaded before.
+' Runs every scenario flagged Include_In_Run, restores whatever was loaded before, then
+' refreshes the current state once.
 Public Sub RunIncludedScenarios()
     Dim ids As Variant
     Dim queue() As String
@@ -172,6 +208,7 @@ Public Sub RunIncludedScenarios()
     If Len(restoreId) > 0 Then
         If ScenarioExists(restoreId) Then LoadScenario restoreId
     End If
+    failures = failures & RefreshCurrentState(metrics)
     EndBatch guard
  
     RefreshScenarioManager
@@ -267,8 +304,8 @@ End Sub
  
 Private Sub ReportRun(ByVal queued As Long, ByVal failures As String)
     If Len(failures) = 0 Then
-        MsgBox "Ran " & queued & " scenario(s). Results are in " & ResultsTableName() & ".", _
-               vbInformation
+        MsgBox "Ran " & queued & " scenario(s) and refreshed the current state. Results " & _
+               "are in " & ResultsTableName() & ".", vbInformation
     Else
         MsgBox "Ran " & queued & " scenario(s). Some did not produce results:" & vbNewLine & _
                vbNewLine & failures, vbExclamation

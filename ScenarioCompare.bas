@@ -224,8 +224,14 @@ End Function
 '
 ' Button handler on the template design sheet. The user selects the new rectangle, picks
 ' which template that rectangle belongs to from the cmbRedefineTemplate combo box, and
-' clicks the button. The old range loses its black border and header label; the new range
-' gets them.
+' clicks the button. The old range loses its highlight frame and header label; the new
+' range gets them.
+'
+' The frame is drawn on the ring of cells one outside the template range, never on the
+' range itself: a fill on the ring plus a thick black border around its outer edge, with
+' the label in the ring cell above the top-left. Rendering copies only the range, so the
+' marker can't follow a template into the generated blocks. The output sheet's templates
+' share the same marker code.
 
 ' Rebuilds the redefine combo box's list from the configured templates. Called by the
 ' button so adding a template is still just an edit to CompareTemplates().
@@ -315,9 +321,8 @@ Private Function FindShape(shapeName As String) As Shape
     Next ws
 End Function
 
-' Points the picked template's named range at newRange, clears the markers around the
-' previous range, and marks the new one. The marker is a black perimeter border plus the
-' template's label written in the cell above the top-left.
+' Points the picked template's named range at newRange, clears the frame around the
+' previous range, and frames the new one.
 Public Sub RedefineSelectedTemplateRange(ByVal newRange As Range)
     Dim chosen As CompareTemplateSpec
     Dim oldRange As Range
@@ -334,6 +339,11 @@ Public Sub RedefineSelectedTemplateRange(ByVal newRange As Range)
         Err.Raise vbObjectError + 645, "ScenarioCompare", _
                   "The template range cannot start on row 1 because the label needs the row above it."
     End If
+    If Not TemplateFrameFits(newRange) Then
+        Err.Raise vbObjectError + 646, "ScenarioCompare", _
+                  "The template range needs a free cell on every side for its highlight " & _
+                  "frame, so it cannot start in column A or touch the sheet's last row or column."
+    End If
 
     chosen = SelectedRedefineTemplate()
 
@@ -344,16 +354,65 @@ Public Sub RedefineSelectedTemplateRange(ByVal newRange As Range)
     MarkTemplateRange newRange, chosen.label
 End Sub
 
-' Removes the perimeter border and the header label from a previously marked range. The
-' label is only cleared when it still matches the template, so unrelated content in that
-' cell is left alone.
-Private Sub ClearTemplateRangeMarkers(rng As Range, label As String)
+' Re-frames every summary and output template where it currently stands. Clearing first
+' also strips the old-style border drawn on the range itself, so running this once moves
+' existing templates over to the outside frame. Returns the labels of any template that
+' was skipped, one per line, or "" when all were framed.
+Public Function RefreshTemplateFrames() As String
+    Dim skipped As String
+
+    skipped = RefreshFramesFor(CompareTemplates())
+    skipped = skipped & RefreshFramesFor(ScenarioOutputTemplates())
+    RefreshTemplateFrames = skipped
+End Function
+
+Private Function RefreshFramesFor(templates() As CompareTemplateSpec) As String
+    Dim rng As Range
+    Dim i As Long
+
+    For i = LBound(templates) To UBound(templates)
+        Set rng = NamedRangeOrNothing(templates(i).nameRef)
+        If rng Is Nothing Then
+            RefreshFramesFor = RefreshFramesFor & templates(i).label & _
+                               " (no range named " & templates(i).nameRef & ")" & vbNewLine
+        ElseIf Not TemplateFrameFits(rng) Then
+            RefreshFramesFor = RefreshFramesFor & templates(i).label & _
+                               " (no room for a frame around " & rng.Address(False, False) & _
+                               "; redefine it away from row 1, column A and the sheet edge)" & vbNewLine
+        Else
+            ClearTemplateRangeMarkers rng, templates(i).label
+            MarkTemplateRange rng, templates(i).label
+        End If
+    Next i
+End Function
+
+' True when rng has a cell on every side for the frame to sit in.
+Public Function TemplateFrameFits(rng As Range) As Boolean
+    Dim ws As Worksheet
+
+    Set ws = rng.Worksheet
+    TemplateFrameFits = rng.Row > 1 And rng.Column > 1 And _
+                        rng.Row + rng.Rows.count - 1 < ws.Rows.count And _
+                        rng.Column + rng.Columns.count - 1 < ws.Columns.count
+End Function
+
+' Removes the frame and the header label from a previously marked range. Only cells and
+' edges still carrying the marker's own fill and border are cleared, and the label only
+' when it still matches the template, so the user's own formatting is left alone.
+Public Sub ClearTemplateRangeMarkers(rng As Range, label As String)
+    Dim cell As Range
     Dim labelCell As Range
 
-    rng.Borders(xlEdgeTop).LineStyle = xlNone
-    rng.Borders(xlEdgeBottom).LineStyle = xlNone
-    rng.Borders(xlEdgeLeft).LineStyle = xlNone
-    rng.Borders(xlEdgeRight).LineStyle = xlNone
+    ' Ranges marked before the frame moved outside carry the border on the range itself;
+    ' strip it here so a redefine also cleans up the old style.
+    ClearMarkerBorder rng
+
+    If TemplateFrameFits(rng) Then
+        ClearMarkerBorder TemplateFrame(rng)
+        For Each cell In TemplateFrameRing(rng).Cells
+            If cell.Interior.Color = TemplateFrameColor() Then cell.Interior.Pattern = xlNone
+        Next cell
+    End If
 
     If rng.Row > 1 Then
         Set labelCell = rng.Cells(1, 1).Offset(-1, 0)
@@ -363,9 +422,41 @@ Private Sub ClearTemplateRangeMarkers(rng As Range, label As String)
     End If
 End Sub
 
-Private Sub MarkTemplateRange(rng As Range, label As String)
-    rng.BorderAround LineStyle:=xlContinuous, Weight:=xlThick, Color:=vbBlack
+' Callers check TemplateFrameFits first.
+Public Sub MarkTemplateRange(rng As Range, label As String)
+    TemplateFrameRing(rng).Interior.Color = TemplateFrameColor()
+    TemplateFrame(rng).BorderAround LineStyle:=xlContinuous, Weight:=xlThick, Color:=vbBlack
     rng.Cells(1, 1).Offset(-1, 0).value = label
+End Sub
+
+' rng grown by one cell on every side.
+Private Function TemplateFrame(rng As Range) As Range
+    Set TemplateFrame = rng.Offset(-1, -1).Resize(rng.Rows.count + 2, rng.Columns.count + 2)
+End Function
+
+' Just the ring of cells between rng and the outer edge of its frame.
+Private Function TemplateFrameRing(rng As Range) As Range
+    Dim frame As Range
+
+    Set frame = TemplateFrame(rng)
+    Set TemplateFrameRing = Union(frame.Rows(1), frame.Rows(frame.Rows.count), _
+                                  frame.Columns(1), frame.Columns(frame.Columns.count))
+End Function
+
+' Clears each perimeter edge of rng that is the marker's thick black line. A mixed edge
+' reads back as Null, which If treats as False, so it is left alone.
+Private Sub ClearMarkerBorder(rng As Range)
+    Dim edges As Variant
+    Dim i As Long
+
+    edges = Array(xlEdgeTop, xlEdgeBottom, xlEdgeLeft, xlEdgeRight)
+    For i = LBound(edges) To UBound(edges)
+        With rng.Borders(edges(i))
+            If .LineStyle = xlContinuous And .Weight = xlThick And .Color = vbBlack Then
+                .LineStyle = xlNone
+            End If
+        End With
+    Next i
 End Sub
 
 '=======================================================================================
