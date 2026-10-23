@@ -11,7 +11,9 @@ Option Explicit
 '   OpenTokenBuilder()      Loads frmTokenBuilder and shows it modelessly. Multiple
 '                           Shape buttons on different sheets can call this; the
 '                           form never activates another sheet or alters the
-'                           selection, so the user's context is preserved.
+'                           selection, so the user's context is preserved. If the
+'                           form is already open, it is brought back to the front
+'                           instead of opening a second copy.
 '
 ' Compose: one function per token kind, each returning the exact grammar string.
 '
@@ -77,11 +79,21 @@ End Type
 '=======================================================================================
 
 Public Sub OpenTokenBuilder()
+    Dim frm As Object
+
     EnsureLibrarySheet
 
-    ' UserForms.Add loads the form if it's not already loaded. A missing form raises;
-    ' we catch and offer the bootstrap rather than crashing out of a Shape button
-    ' click.
+    ' UserForms.Add always creates a fresh instance, so check for one that's already
+    ' open first. Calling Show on a loaded modeless form re-shows it if hidden and
+    ' activates it, which brings it to the front with focus.
+    Set frm = LoadedTokenBuilder()
+    If Not frm Is Nothing Then
+        frm.Show vbModeless
+        Exit Sub
+    End If
+
+    ' A missing form raises; we catch and offer the bootstrap rather than crashing
+    ' out of a Shape button click.
     On Error GoTo FormMissing
     UserForms.Add("frmTokenBuilder").Show vbModeless
     Exit Sub
@@ -704,19 +716,28 @@ Public Sub ResetLibCopyCaption()
 End Sub
 
 Private Sub CallFormResetter(methodName As String)
-    Dim i As Long
     Dim frm As Object
 
+    Set frm = LoadedTokenBuilder()
+    If frm Is Nothing Then Exit Sub
+
     On Error Resume Next
-    For i = 0 To UserForms.count - 1
-        Set frm = UserForms(i)
-        If StrComp(TypeName(frm), "frmTokenBuilder", vbTextCompare) = 0 Then
-            CallByName frm, methodName, VbMethod
-            Exit Sub
-        End If
-    Next i
+    CallByName frm, methodName, VbMethod
     On Error GoTo 0
 End Sub
+
+' Returns the loaded frmTokenBuilder instance, or Nothing if it isn't open. Walks
+' UserForms by TypeName so this compiles even before the form has been imported.
+Private Function LoadedTokenBuilder() As Object
+    Dim i As Long
+
+    For i = 0 To UserForms.count - 1
+        If StrComp(TypeName(UserForms(i)), "frmTokenBuilder", vbTextCompare) = 0 Then
+            Set LoadedTokenBuilder = UserForms(i)
+            Exit Function
+        End If
+    Next i
+End Function
 
 '=======================================================================================
 ' Small helpers
