@@ -26,6 +26,13 @@ Private suppressRefresh As Boolean
 ' geometry and font: one row per pick, then the live value, then the format row.
 Private Const SEGMENT_ROW_STEP As Single = 22
 
+' MSForms list boxes drift when their contents are rebuilt: IntegralHeight snaps the
+' height to whole rows and display scaling compounds it, so the series lists jump
+' each time a source or baseline table is picked. The designed geometry is captured
+' on open and put back after every repopulate.
+Private seriesListBox As Variant
+Private baseSeriesListBox As Variant
+
 Private WithEvents cboSegmentId As MSForms.ComboBox
 Private WithEvents cboSegmentCol As MSForms.ComboBox
 Private lblSegmentId As MSForms.Label
@@ -38,6 +45,10 @@ Private Sub UserForm_Initialize()
     ' display scaling (e.g. 125%) and won't keep typed values.
     Me.Width = 540
     Me.Height = 620
+    lstInlineSeries.IntegralHeight = False
+    lstInlineBaseSeries.IntegralHeight = False
+    seriesListBox = CaptureBox(lstInlineSeries)
+    baseSeriesListBox = CaptureBox(lstInlineBaseSeries)
     BuildSegmentPanel
     ApplyTabOrder
     PopulateKindCombo
@@ -460,6 +471,23 @@ Private Sub RefreshInlineColumnLists(baselineSide As Boolean)
             lstInlineBaseSeries.AddItem names(i)
         Next i
     End If
+    PinInlineLists
+End Sub
+
+Private Sub PinInlineLists()
+    RestoreBox lstInlineSeries, seriesListBox
+    RestoreBox lstInlineBaseSeries, baseSeriesListBox
+End Sub
+
+Private Function CaptureBox(ctl As Object) As Variant
+    CaptureBox = Array(ctl.Left, ctl.Top, ctl.Width, ctl.Height)
+End Function
+
+Private Sub RestoreBox(ctl As Object, box As Variant)
+    ctl.Left = box(0)
+    ctl.Top = box(1)
+    ctl.Width = box(2)
+    ctl.Height = box(3)
 End Sub
 
 Private Sub RebuildPreview()
@@ -607,6 +635,64 @@ Private Sub btnClose_Click()
     Unload Me
 End Sub
 
+Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
+    StopWheelScroll
+End Sub
+
+' Mouse-wheel routing (see MouseWheel). Hovering a list or combo makes it the scroll
+' target; hovering blank form space clears the target so the wheel does nothing there.
+Private Sub UserForm_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll Nothing, Me
+End Sub
+Private Sub cboTokenKind_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboTokenKind, Me
+End Sub
+Private Sub cboMetricSource_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboMetricSource, Me
+End Sub
+Private Sub cboMetricSegment_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboMetricSegment, Me
+End Sub
+Private Sub cboMetricType_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboMetricType, Me
+End Sub
+Private Sub cboScenarioCol_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboScenarioCol, Me
+End Sub
+Private Sub cboSegmentId_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboSegmentId, Me
+End Sub
+Private Sub cboSegmentCol_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboSegmentCol, Me
+End Sub
+Private Sub cboValueFormat_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboValueFormat, Me
+End Sub
+Private Sub cboChartNamed_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboChartNamed, Me
+End Sub
+Private Sub cboInlineKind_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboInlineKind, Me
+End Sub
+Private Sub cboInlineSource_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboInlineSource, Me
+End Sub
+Private Sub cboInlineX_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboInlineX, Me
+End Sub
+Private Sub lstInlineSeries_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll lstInlineSeries, Me
+End Sub
+Private Sub cboInlineBase_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll cboInlineBase, Me
+End Sub
+Private Sub lstInlineBaseSeries_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll lstInlineBaseSeries, Me
+End Sub
+Private Sub lstSaved_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    WheelScroll lstSaved, Me
+End Sub
+
 Private Sub ClearInputs()
     suppressRefresh = True
     cboMetricSource.ListIndex = -1
@@ -622,6 +708,7 @@ Private Sub ClearInputs()
     lstInlineSeries.Clear
     cboInlineBase.ListIndex = -1
     lstInlineBaseSeries.Clear
+    PinInlineLists
     txtInlineTitle.text = ""
     txtInlineFormat.text = ""
     chkInlineLegend.Value = True
