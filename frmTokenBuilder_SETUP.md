@@ -36,7 +36,7 @@ code toggles their `Visible` property.
 +-----------------------------------------------------------------+
 | Token kind: [ Metric value              v ]                     |
 |                                                                 |
-| [ One of four panels — see below ]                              |
+| [ One of five panels — see below ]                              |
 |                                                                 |
 | [ yellow banner, visible on validation issues ]                 |
 |                                                                 |
@@ -127,9 +127,28 @@ exclusive. Make sure every one of them has that string in `GroupName`.
 | `lblScenarioCol`  | Label    | 10   | 36  | 70    | 15     | `Column:`  |
 | `cboScenarioCol`  | ComboBox | 85   | 34  | 240   | 18     |            |
 
-### Value format row (shown for Metric value and Scenario field)
+### Segment attribute panel (shown for Segment attribute)
 
-These three controls are shared by both panels. The code moves them at runtime
+Nothing to add in the designer. The form builds these controls itself when it
+opens (`BuildSegmentPanel`), copying the position, size and font of
+`lblScenarioCol` / `cboScenarioCol`, so they line up with the Scenario-field
+panel:
+
+| Created in code      | Type     | Row                    | Caption        |
+|----------------------|----------|------------------------|----------------|
+| `lblSegmentId`       | Label    | same row as `Column:`  | `Segment ID:`  |
+| `cboSegmentId`       | ComboBox | same row as `Column:`  |                |
+| `lblSegmentCol`      | Label    | one row down           | `Column:`      |
+| `cboSegmentCol`      | ComboBox | one row down           |                |
+| `lblSegmentValue`    | Label    | two rows down          | `Value now:`   |
+| `lblSegmentValueVal` | Label    | two rows down          | live value     |
+
+Don't add controls with these names in the designer; `Controls.Add` would fail
+on the duplicate name.
+
+### Value format row (shown for Metric value, Scenario field and Segment attribute)
+
+These three controls are shared by all three value panels. The code moves them at runtime
 so they sit directly under whichever panel is showing, so the `Top` values below
 only matter in the designer.
 
@@ -216,15 +235,29 @@ Option Explicit
 Private editingTokenId As String
 Private suppressRefresh As Boolean
 
+' The segment attribute panel is built in code when the form opens rather than in the
+' designer, so adding it needed no change to the .frx. It copies the scenario panel's
+' geometry and font: one row per pick, then the live value, then the format row.
+Private Const SEGMENT_ROW_STEP As Single = 22
+
+Private WithEvents cboSegmentId As MSForms.ComboBox
+Private WithEvents cboSegmentCol As MSForms.ComboBox
+Private lblSegmentId As MSForms.Label
+Private lblSegmentCol As MSForms.Label
+Private lblSegmentValue As MSForms.Label
+Private lblSegmentValueVal As MSForms.Label
+
 Private Sub UserForm_Initialize()
     ' Set at runtime because the VBE designer rescales these under Windows
     ' display scaling (e.g. 125%) and won't keep typed values.
     Me.Width = 540
     Me.Height = 620
+    BuildSegmentPanel
     ApplyTabOrder
     PopulateKindCombo
     PopulateMetricSourceCombo
     PopulateScenarioCombo
+    PopulateSegmentCombos
     PopulateValueFormatCombo
     PopulateNamedChartCombo
     PopulateInlineKindCombo
@@ -246,6 +279,7 @@ Private Sub ApplyTabOrder()
                   cboMetricSource, cboMetricSegment, cboMetricType, _
                   optMetric, optCurrent, optDelta, optDeltaPct, optLabel, _
                   cboScenarioCol, _
+                  cboSegmentId, cboSegmentCol, _
                   cboValueFormat, _
                   cboChartNamed, _
                   cboInlineKind, cboInlineSource, cboInlineX, lstInlineSeries, _
@@ -265,6 +299,7 @@ Private Sub PopulateKindCombo()
     cboTokenKind.AddItem "Scenario field"
     cboTokenKind.AddItem "Chart (named)"
     cboTokenKind.AddItem "Chart (inline)"
+    cboTokenKind.AddItem "Segment attribute"
 End Sub
 
 ' Metric picker: Source -> Segment -> Metric. Each Fill* rebuilds the list below
@@ -326,6 +361,55 @@ Private Sub SelectMetricById(metricId As String)
     SelectComboValue cboMetricType, MetricTypeKey(m)
 End Sub
 
+' Segment picker: ID and Column are independent, so neither list depends on the other.
+Private Sub PopulateSegmentCombos()
+    FillCombo cboSegmentId, SegmentIdChoices()
+    FillCombo cboSegmentCol, SegmentColumnChoices()
+End Sub
+
+Private Sub BuildSegmentPanel()
+    Dim rowTop As Single
+    rowTop = cboScenarioCol.Top
+    Set lblSegmentId = AddPanelLabel("lblSegmentId", "Segment ID:", rowTop)
+    Set cboSegmentId = AddPanelCombo("cboSegmentId", rowTop)
+    Set lblSegmentCol = AddPanelLabel("lblSegmentCol", "Column:", rowTop + SEGMENT_ROW_STEP)
+    Set cboSegmentCol = AddPanelCombo("cboSegmentCol", rowTop + SEGMENT_ROW_STEP)
+    Set lblSegmentValue = AddPanelLabel("lblSegmentValue", "Value now:", _
+                                        rowTop + 2 * SEGMENT_ROW_STEP)
+    Set lblSegmentValueVal = AddPanelLabel("lblSegmentValueVal", "", _
+                                           rowTop + 2 * SEGMENT_ROW_STEP)
+    lblSegmentValueVal.Left = cboScenarioCol.Left
+    lblSegmentValueVal.Width = Me.InsideWidth - cboScenarioCol.Left - lblScenarioCol.Left
+End Sub
+
+Private Function AddPanelLabel(name As String, caption As String, _
+                               ByVal rowTop As Single) As MSForms.Label
+    Dim lbl As MSForms.Label
+    Set lbl = Me.Controls.Add("Forms.Label.1", name)
+    lbl.Left = lblScenarioCol.Left
+    lbl.Top = rowTop + (lblScenarioCol.Top - cboScenarioCol.Top)
+    lbl.Width = lblScenarioCol.Width
+    lbl.Height = lblScenarioCol.Height
+    lbl.BackStyle = lblScenarioCol.BackStyle
+    lbl.Font.Name = lblScenarioCol.Font.Name
+    lbl.Font.Size = lblScenarioCol.Font.Size
+    lbl.Caption = caption
+    Set AddPanelLabel = lbl
+End Function
+
+Private Function AddPanelCombo(name As String, ByVal rowTop As Single) As MSForms.ComboBox
+    Dim cbo As MSForms.ComboBox
+    Set cbo = Me.Controls.Add("Forms.ComboBox.1", name)
+    cbo.Left = cboScenarioCol.Left
+    cbo.Top = rowTop
+    cbo.Width = cboScenarioCol.Width
+    cbo.Height = cboScenarioCol.Height
+    cbo.Style = cboScenarioCol.Style
+    cbo.Font.Name = cboScenarioCol.Font.Name
+    cbo.Font.Size = cboScenarioCol.Font.Size
+    Set AddPanelCombo = cbo
+End Function
+
 Private Sub PopulateScenarioCombo()
     Dim names() As String, i As Long
     cboScenarioCol.Clear
@@ -381,12 +465,13 @@ Private Sub PopulateSourceCombos()
 End Sub
 
 Private Sub ApplyKindVisibility()
-    Dim m As Boolean, s As Boolean, cn As Boolean, ci As Boolean
+    Dim m As Boolean, s As Boolean, cn As Boolean, ci As Boolean, sg As Boolean
     Select Case cboTokenKind.ListIndex
         Case 0: m = True
         Case 1: s = True
         Case 2: cn = True
         Case 3: ci = True
+        Case 4: sg = True
     End Select
     SetGroup Array(lblMetric, cboMetricSource, lblMetricSegment, cboMetricSegment, _
                    lblMetricType, cboMetricType, lblFlavour, optMetric, optCurrent, _
@@ -395,9 +480,17 @@ Private Sub ApplyKindVisibility()
                    lblMetricFormat, lblMetricFormatVal, lblMetricSource, _
                    lblMetricSourceVal, lblMetricKey, lblMetricKeyVal), m
     SetGroup Array(lblScenarioCol, cboScenarioCol), s
-    ' One format row serves both value panels, so it sits under whichever is showing.
-    SetGroup Array(lblValueFormat, cboValueFormat, lblValueFormatHint), m Or s
-    If s Then PlaceValueFormatRow 56 Else PlaceValueFormatRow 212
+    SetGroup Array(lblSegmentId, cboSegmentId, lblSegmentCol, cboSegmentCol, _
+                   lblSegmentValue, lblSegmentValueVal), sg
+    ' One format row serves every value panel, so it sits under whichever is showing.
+    SetGroup Array(lblValueFormat, cboValueFormat, lblValueFormatHint), m Or s Or sg
+    If s Then
+        PlaceValueFormatRow 56
+    ElseIf sg Then
+        PlaceValueFormatRow cboSegmentId.Top + 3 * SEGMENT_ROW_STEP
+    Else
+        PlaceValueFormatRow 212
+    End If
     SetGroup Array(lblChartNamed, cboChartNamed, lblChartNamedKind, _
                    lblChartNamedKindVal, lblChartNamedSource, _
                    lblChartNamedSourceVal, lblChartNamedSeries, _
@@ -478,6 +571,23 @@ End Sub
 
 Private Sub cboScenarioCol_Change()
     If Not suppressRefresh Then RebuildPreview
+End Sub
+
+Private Sub cboSegmentId_Change()
+    If suppressRefresh Then Exit Sub
+    RefreshSegmentReadout
+    RebuildPreview
+End Sub
+
+Private Sub cboSegmentCol_Change()
+    If suppressRefresh Then Exit Sub
+    RefreshSegmentReadout
+    RebuildPreview
+End Sub
+
+' What the token would show right now, read live from the segment map.
+Private Sub RefreshSegmentReadout()
+    lblSegmentValueVal.Caption = SegmentPreview(cboSegmentId.Value, cboSegmentCol.Value)
 End Sub
 
 Private Sub cboValueFormat_Change()
@@ -593,6 +703,9 @@ Private Function ComposeCurrentToken() As String
         Case 3
             spec = CurrentInlineChartSpec()
             ComposeCurrentToken = ComposeChartInlineToken(spec)
+        Case 4:  ComposeCurrentToken = ComposeSegmentToken(cboSegmentId.Value, _
+                                                           cboSegmentCol.Value, _
+                                                           cboValueFormat.text)
     End Select
 End Function
 
@@ -682,6 +795,7 @@ Private Function CurrentKindForStorage() As String
         Case 1: CurrentKindForStorage = KIND_SCENARIO
         Case 2: CurrentKindForStorage = KIND_CHART_NAMED
         Case 3: CurrentKindForStorage = KIND_CHART_INLINE
+        Case 4: CurrentKindForStorage = KIND_SEGMENT
     End Select
 End Function
 
@@ -691,6 +805,7 @@ Private Function DefaultLabel() As String
         Case 1: DefaultLabel = "Scenario " & cboScenarioCol.Value
         Case 2: DefaultLabel = cboChartNamed.Value
         Case 3: DefaultLabel = cboInlineSource.Value & " chart"
+        Case 4: DefaultLabel = "Segment " & cboSegmentId.Value & " " & cboSegmentCol.Value
     End Select
 End Function
 
@@ -712,6 +827,8 @@ Private Sub ClearInputs()
     cboMetricSegment.Clear
     cboMetricType.Clear
     cboScenarioCol.ListIndex = -1
+    cboSegmentId.ListIndex = -1
+    cboSegmentCol.ListIndex = -1
     cboValueFormat.text = ""
     cboChartNamed.ListIndex = -1
     cboInlineSource.ListIndex = -1
@@ -726,6 +843,7 @@ Private Sub ClearInputs()
     txtInlineWidth.text = ""
     RefreshMetricReadout
     RefreshNamedChartReadout
+    RefreshSegmentReadout
     suppressRefresh = False
 End Sub
 
@@ -811,6 +929,10 @@ Private Sub LoadParsedIntoControls(parsed As ParsedToken)
         Case KIND_SCENARIO
             cboTokenKind.ListIndex = 1
             SelectComboValue cboScenarioCol, parsed.column
+        Case KIND_SEGMENT
+            cboTokenKind.ListIndex = 4
+            SelectComboValue cboSegmentId, parsed.segmentId
+            SelectComboValue cboSegmentCol, parsed.column
         Case KIND_CHART_NAMED
             cboTokenKind.ListIndex = 2
             SelectComboValue cboChartNamed, parsed.chartLabel
@@ -833,6 +955,7 @@ Private Sub LoadParsedIntoControls(parsed As ParsedToken)
     ApplyKindVisibility
     RefreshMetricReadout
     RefreshNamedChartReadout
+    RefreshSegmentReadout
     suppressRefresh = False
     RebuildPreview
 End Sub
@@ -892,7 +1015,7 @@ else on the form changes.
 2. In the Project Explorer, double-click `frmTokenBuilder` under *Forms* to
    open the designer.
 3. From the Toolbox, add the three controls in
-   [Value format row](#value-format-row-shown-for-metric-value-and-scenario-field)
+   [Value format row](#value-format-row-shown-for-metric-value-scenario-field-and-segment-attribute)
    and set their properties exactly as listed. The names matter; the positions
    are only a starting point because the code moves the row at runtime.
    - If the Metric panel's controls overlap where the row goes, that's fine —
@@ -934,6 +1057,33 @@ Where the token lands decides how the format is used:
 | Text: `NIM: {Metric.X\|0.00%}`          | The value is written as text through Excel's `TEXT()`, e.g. `NIM: 2.35%`. |
 
 If Excel rejects a format, the token behaves as though the box were blank.
+
+## Segment attribute tokens
+
+**Segment attribute** in the `Token kind:` list builds a token that reads one
+cell of the segment map, `tblProductMap`, keyed by `Pricing_Segment_ID`:
+
+```
+{Segment.42.Segment Description}
+{Segment.42.LVR_Band|0%}
+```
+
+- **Segment ID** lists every ID in the table, in the table's own row order.
+- **Column** lists every other column of the table. Each column is an attribute
+  of the segment.
+- **Value now** shows what the token would render right now.
+- **Value format** works the same as for metric and scenario tokens.
+
+The token isn't a metric. It's never stored in `tblScenarioResults`, it's the
+same in every scenario's block, and it's read from the table each time a
+template renders, so edits to `tblProductMap` show up on the next build. A
+render reads the table once per block, however many segment tokens the block
+holds.
+
+The table and key column are set in `ScenarioConfig`
+(`SegmentMapTableName`, `SegmentMapKeyColumn`). An ID or column that isn't in
+the table renders as `n/a` (`NA()` inside a formula), and the yellow banner
+names what's missing.
 
 ## Troubleshooting
 

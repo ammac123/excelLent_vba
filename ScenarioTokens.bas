@@ -33,6 +33,12 @@ Option Explicit
 '   {Current.<MetricID>}       the current-state baseline for the metric
 '   {Delta.<MetricID>}         this scenario's value minus the baseline
 '   {DeltaPct.<MetricID>}      (scenario - current) / current, as a decimal
+'   {Segment.<ID>.<Column>}    an attribute of a segment from the segment map table
+'                              (tblProductMap, keyed by Pricing_Segment_ID; see
+'                              ScenarioConfig), e.g. {Segment.42.Segment Description}.
+'                              The ID runs to the first "." and the column is the rest.
+'                              Read live, and the same in every scenario's block. An
+'                              unknown ID or column resolves like a missing metric.
 '
 ' Unknown tokens are left exactly as written, so braces used for other purposes survive
 ' untouched.
@@ -101,6 +107,14 @@ Option Explicit
 '   SplitTokenFormat(token, numberFormat)
 '       The token without its "|format" suffix, with the format returned via
 '       numberFormat.
+'   SegmentAttribute(segmentId, column, missing)
+'       One cell of the segment map, or missing when the ID or column is unknown.
+'   SplitSegmentBody(body, segmentId, column)
+'       Splits the "<ID>.<Column>" part of a Segment token.
+'   SegmentMapIds(), SegmentMapHasId(segmentId)
+'       The IDs in the segment map, and whether one is there.
+'   ForgetSegmentMap
+'       Drops the cached segment map so the next lookup re-reads the table.
 
 Private Const TOKEN_OPEN As String = "{"
 Private Const TOKEN_CLOSE As String = "}"
@@ -111,8 +125,17 @@ Private Const PREFIX_LABEL As String = "Label."
 Private Const PREFIX_CURRENT As String = "Current."
 Private Const PREFIX_DELTA As String = "Delta."
 Private Const PREFIX_DELTA_PCT As String = "DeltaPct."
+Private Const PREFIX_SEGMENT As String = "Segment."
 
 Private Const MISSING_VALUE As String = "n/a"
+
+' The segment map, read once and reused for every Segment token until ForgetSegmentMap.
+' FillTokens forgets it at the start of each block, so a build always sees the live table
+' but never reads it more than once per block.
+Private segmentMapLoaded As Boolean
+Private segmentMapBody As Variant
+Private segmentMapRows As Object     ' segment ID -> row in segmentMapBody
+Private segmentMapCols As Object     ' column header -> column in segmentMapBody
 
 '=======================================================================================
 ' Delimiter accessors
@@ -146,6 +169,8 @@ Public Sub FillTokens(block As Range, scenarioId As String, ByVal blockIndex As 
     Dim text As String
     Dim token As String
     Dim tokenFormat As String
+
+    ForgetSegmentMap
 
     For Each cell In block.Cells
         If cell.HasFormula Then
@@ -246,7 +271,8 @@ Public Function IsKnownToken(rawToken As String) As Boolean
                    StartsWith(token, PREFIX_SCENARIO) Or _
                    StartsWith(token, PREFIX_CURRENT) Or _
                    StartsWith(token, PREFIX_DELTA_PCT) Or _
-                   StartsWith(token, PREFIX_DELTA)
+                   StartsWith(token, PREFIX_DELTA) Or _
+                   StartsWith(token, PREFIX_SEGMENT)
 End Function
 
 ' Splits "Metric.NIM|0.00%" into "Metric.NIM" and "0.00%". Only the first "|" splits,
@@ -280,6 +306,7 @@ Public Function ResolveToken(rawToken As String, scenarioId As String, ByVal blo
                              missing As Variant) As Variant
     Dim token As String
     Dim body As String
+    Dim segmentId As String, column As String
 
     token = BareToken(rawToken)
 
@@ -314,6 +341,15 @@ Public Function ResolveToken(rawToken As String, scenarioId As String, ByVal blo
     If StartsWith(token, PREFIX_DELTA) Then
         body = Mid$(token, Len(PREFIX_DELTA) + 1)
         ResolveToken = DeltaValue(results, scenarioId, body, False, missing)
+        Exit Function
+    End If
+
+    If StartsWith(token, PREFIX_SEGMENT) Then
+        If SplitSegmentBody(Mid$(token, Len(PREFIX_SEGMENT) + 1), segmentId, column) Then
+            ResolveToken = SegmentAttribute(segmentId, column, missing)
+        Else
+            ResolveToken = missing
+        End If
         Exit Function
     End If
 
@@ -579,6 +615,116 @@ Public Sub LoadCatalogueMaps(ByRef labels As Object, ByRef formats As Object, _
         formats(specs(i).metric) = specs(i).numberFormat
         groups(specs(i).metric) = specs(i).groupName
     Next i
+End Sub
+
+'---------------------------------------------------------------------------------------
+' Segment map
+'---------------------------------------------------------------------------------------
+
+' Splits "42.Segment Description" into "42" and "Segment Description". The ID runs to
+' the first ".", so a column header may itself contain dots. False when either part is
+' missing.
+Public Function SplitSegmentBody(body As String, ByRef segmentId As String, _
+                                 ByRef column As String) As Boolean
+    Dim cut As Long
+
+    segmentId = ""
+    column = ""
+    cut = InStr(body, ".")
+    If cut = 0 Then Exit Function
+
+    segmentId = Trim$(Left$(body, cut - 1))
+    column = Trim$(Mid$(body, cut + 1))
+    SplitSegmentBody = (Len(segmentId) > 0 And Len(column) > 0)
+End Function
+
+' One attribute of one segment, keeping the cell's own type so a number stays a number.
+' A blank cell comes back as "" rather than missing: the segment exists, it just has no
+' value there. An error in the cell, an unknown ID or column, or a missing table all
+' come back as missing.
+Public Function SegmentAttribute(segmentId As String, column As String, _
+                                 missing As Variant) As Variant
+    Dim value As Variant
+
+    SegmentAttribute = missing
+    LoadSegmentMap
+    If segmentMapRows.count = 0 Then Exit Function
+    If Not segmentMapRows.Exists(segmentId) Then Exit Function
+    If Not segmentMapCols.Exists(column) Then Exit Function
+
+    value = segmentMapBody(segmentMapRows(segmentId), segmentMapCols(column))
+    If IsError(value) Then Exit Function
+    If IsEmpty(value) Then value = ""
+    SegmentAttribute = value
+End Function
+
+' Segment IDs in table order, skipping blanks, errors and repeats. An empty map comes
+' back as Split(vbNullString), a real zero-length array.
+Public Function SegmentMapIds() As String()
+    Dim ids() As String
+    Dim key As Variant
+    Dim n As Long
+
+    LoadSegmentMap
+    If segmentMapRows.count = 0 Then
+        SegmentMapIds = Split(vbNullString)
+        Exit Function
+    End If
+
+    ReDim ids(1 To segmentMapRows.count)
+    For Each key In segmentMapRows.Keys
+        n = n + 1
+        ids(n) = key
+    Next key
+    SegmentMapIds = ids
+End Function
+
+Public Function SegmentMapHasId(segmentId As String) As Boolean
+    LoadSegmentMap
+    SegmentMapHasId = segmentMapRows.Exists(segmentId)
+End Function
+
+Public Sub ForgetSegmentMap()
+    segmentMapLoaded = False
+    segmentMapBody = Empty
+    Set segmentMapRows = Nothing
+    Set segmentMapCols = Nothing
+End Sub
+
+' Reads the whole table in one go. A missing table or key column leaves both
+' dictionaries empty, so every lookup resolves as missing instead of raising mid-render.
+' The first row wins when an ID appears twice.
+Private Sub LoadSegmentMap()
+    Dim lo As ListObject
+    Dim keyCol As Long
+    Dim key As String
+    Dim r As Long, c As Long
+
+    If segmentMapLoaded Then Exit Sub
+    segmentMapLoaded = True
+
+    Set segmentMapRows = CreateObject("Scripting.Dictionary")
+    Set segmentMapCols = CreateObject("Scripting.Dictionary")
+    segmentMapRows.CompareMode = 1
+    segmentMapCols.CompareMode = 1
+
+    Set lo = TableOrNothing(SegmentMapTableName())
+    If lo Is Nothing Then Exit Sub
+    keyCol = ColumnIndexOrZero(lo, SegmentMapKeyColumn())
+    If keyCol = 0 Then Exit Sub
+
+    segmentMapBody = TableBody(lo)
+    If IsEmpty(segmentMapBody) Then Exit Sub
+
+    For c = 1 To lo.ListColumns.count
+        segmentMapCols(lo.ListColumns(c).Name) = c
+    Next c
+    For r = 1 To UBound(segmentMapBody, 1)
+        If Not IsError(segmentMapBody(r, keyCol)) Then
+            key = Trim$(CStr(segmentMapBody(r, keyCol)))
+            If Len(key) > 0 And Not segmentMapRows.Exists(key) Then segmentMapRows.Add key, r
+        End If
+    Next r
 End Sub
 
 '=======================================================================================

@@ -30,6 +30,11 @@ Private Const NAME_OUTPUT_PICKER As String = "outputScenarioPicker"
 Private Const NAME_OUTPUT_TEMPLATE_PICKER As String = "outputTemplatePicker"
 Private Const NAME_OUTPUT_REDEFINE_COMBO As String = "cmbRedefineOutputTemplate"
 
+' Segment attributes for {Segment.<ID>.<Column>} tokens: one row per segment, keyed by
+' the segment ID, with every other column an attribute of that segment.
+Private Const TBL_SEGMENT_MAP As String = "tblProductMap"
+Private Const COL_SEGMENT_MAP_KEY As String = "Pricing_Segment_ID"
+
 ' Hidden sheet that stores reusable tokens for the token builder UI.
 Private Const SHEET_TOKEN_LIBRARY As String = "98_SCN_TokenLibrary"
 Private Const TBL_SAVED_TOKENS As String = "tblSavedTokens"
@@ -249,6 +254,22 @@ Public Function OutputRedefineComboName() As String
 End Function
 
 '=======================================================================================
+' Segment attributes
+'=======================================================================================
+
+' Table that {Segment.<ID>.<Column>} tokens read from. It is read live at render time,
+' never copied into a scenario, so editing it changes every template on the next build.
+Public Function SegmentMapTableName() As String
+    SegmentMapTableName = TBL_SEGMENT_MAP
+End Function
+
+' Column holding the segment ID each row is keyed by. Every other column is offered as
+' an attribute.
+Public Function SegmentMapKeyColumn() As String
+    SegmentMapKeyColumn = COL_SEGMENT_MAP_KEY
+End Function
+
+'=======================================================================================
 ' Token builder library
 '=======================================================================================
 
@@ -283,22 +304,50 @@ End Function
 ' editing code. Series must be real column names of the referenced table; the output
 ' sheet re-renders each build, so changing a spec here flows through at the next click.
 Public Function ScenarioOutputCharts() As ChartSpec()
-    Dim specs(1 To 2) As ChartSpec
+    Dim specs(1 To 4) As ChartSpec
 
     specs(1) = MakeChartSpec(label:="Monthly RFC vs baseline", _
                              kind:="Line", _
                              sourceTable:="tblMetricsOutRFCMonthly", _
                              xColumn:="Month", _
-                             seriesColumns:="Value", _
+                             seriesColumns:="All_App_Volumes", _
                              baselineTable:="tblMetricsOutRFCMonthly_CURRENT", _
-                             baselineColumns:="Value", _
-                             title:="Monthly RFC: scenario vs current state", _
+                             baselineColumns:="All_App_Volumes", _
+                             title:="Monthly RFC Apps: scenario vs current state", _
                              numberFormat:="#,##0", _
                              showLegend:=True, _
                              heightRows:=18, _
                              widthCols:=10)
 
-    specs(2) = MakeChartSpec(label:="Segment NIM", _
+    specs(2) = MakeChartSpec(label:="Monthly RFC vs baseline - OA", _
+                             kind:="Line", _
+                             sourceTable:="tblMetricsOutRFCMonthly", _
+                             xColumn:="Month", _
+                             seriesColumns:="OA_App_Volumes", _
+                             baselineTable:="tblMetricsOutRFCMonthly_CURRENT", _
+                             baselineColumns:="OA_App_Volumes", _
+                             title:="Monthly RFC OA Apps: scenario vs current state", _
+                             numberFormat:="#,##0", _
+                             showLegend:=True, _
+                             heightRows:=18, _
+                             widthCols:=10)
+
+
+    specs(3) = MakeChartSpec(label:="Monthly RFC vs baseline - MS", _
+                             kind:="Line", _
+                             sourceTable:="tblMetricsOutRFCMonthly", _
+                             xColumn:="Month", _
+                             seriesColumns:="MS_App_Volumes", _
+                             baselineTable:="tblMetricsOutRFCMonthly_CURRENT", _
+                             baselineColumns:="MS_App_Volumes", _
+                             title:="Monthly RFC MS Apps: scenario vs current state", _
+                             numberFormat:="#,##0", _
+                             showLegend:=True, _
+                             heightRows:=18, _
+                             widthCols:=10)
+
+
+    specs(4) = MakeChartSpec(label:="Segment NIM", _
                              kind:="Column", _
                              sourceTable:="tblMetricsOutSegment", _
                              xColumn:="Segment Description", _

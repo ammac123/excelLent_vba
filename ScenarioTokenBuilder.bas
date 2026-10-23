@@ -19,6 +19,7 @@ Option Explicit
 '   ComposeScenarioToken(column, [numberFormat])
 '                                   numberFormat, when set, is appended as
 '                                   "|<format>" per the ScenarioTokens grammar.
+'   ComposeSegmentToken(segmentId, column, [numberFormat])
 '   ComposeChartNamedToken(label)
 '   ComposeChartInlineToken(spec)   emits kind=;source=;x=;series=;... matching
 '                                   ScenarioOutput.ParseInlineChartSpec.
@@ -40,6 +41,9 @@ Option Explicit
 '   NamedChartChoices()             entries from ScenarioOutputCharts()
 '   SourceTableChoices()            every ListObject in the workbook
 '   TableColumnChoices(tableName)   that table's column names
+'   SegmentIdChoices()              segment IDs in the segment map, in table order
+'   SegmentColumnChoices()          the segment map's attribute columns
+'   SegmentPreview(segmentId, col)  the live value a Segment token would show
 '   MetricById(metricId)            the live MetricSpec for a given id, or an
 '                                   empty struct if the metric no longer exists
 
@@ -49,6 +53,7 @@ Public Const KIND_DELTA As String = "Delta"
 Public Const KIND_DELTA_PCT As String = "DeltaPct"
 Public Const KIND_LABEL As String = "Label"
 Public Const KIND_SCENARIO As String = "Scenario"
+Public Const KIND_SEGMENT As String = "Segment"
 Public Const KIND_CHART_NAMED As String = "ChartNamed"
 Public Const KIND_CHART_INLINE As String = "ChartInline"
 Public Const KIND_UNKNOWN As String = "Unknown"
@@ -60,8 +65,9 @@ Public Const METRIC_SEGMENT_NONE As String = "(no segment)"
 Public Type ParsedToken
     kind As String          ' one of the KIND_* constants
     metricId As String      ' for Metric / Current / Delta / DeltaPct / Label
-    column As String        ' for Scenario
-    numberFormat As String  ' the "|<format>" suffix on a metric or scenario token
+    column As String        ' for Scenario, and the attribute column for Segment
+    segmentId As String     ' for Segment
+    numberFormat As String  ' the "|<format>" suffix on a metric, scenario or segment token
     chartLabel As String    ' for ChartNamed
     chartSpec As ChartSpec  ' for ChartInline
 End Type
@@ -119,6 +125,13 @@ Public Function ComposeScenarioToken(column As String, _
                            FormatSuffix(numberFormat) & TokenClose()
 End Function
 
+Public Function ComposeSegmentToken(segmentId As String, column As String, _
+                                    Optional numberFormat As String = "") As String
+    If Len(Trim$(segmentId)) = 0 Or Len(Trim$(column)) = 0 Then Exit Function
+    ComposeSegmentToken = TokenOpen() & "Segment." & Trim$(segmentId) & "." & Trim$(column) & _
+                          FormatSuffix(numberFormat) & TokenClose()
+End Function
+
 Private Function FormatSuffix(numberFormat As String) As String
     If Len(Trim$(numberFormat)) = 0 Then Exit Function
     FormatSuffix = TokenFormatSeparator() & Trim$(numberFormat)
@@ -168,6 +181,7 @@ End Function
 Public Function ParseTokenForEdit(token As String) As ParsedToken
     Dim trimmed As String, inner As String, body As String
     Dim fmt As String
+    Dim segmentId As String, column As String
 
     ParseTokenForEdit.kind = KIND_UNKNOWN
     trimmed = Trim$(token)
@@ -197,6 +211,14 @@ Public Function ParseTokenForEdit(token As String) As ParsedToken
     If StartsWithCI(inner, "Scenario.") Then
         ParseTokenForEdit.kind = KIND_SCENARIO
         ParseTokenForEdit.column = Mid$(inner, Len("Scenario.") + 1)
+        Exit Function
+    End If
+
+    If StartsWithCI(inner, "Segment.") Then
+        SplitSegmentBody Mid$(inner, Len("Segment.") + 1), segmentId, column
+        ParseTokenForEdit.kind = KIND_SEGMENT
+        ParseTokenForEdit.segmentId = segmentId
+        ParseTokenForEdit.column = column
         Exit Function
     End If
 
@@ -268,6 +290,9 @@ Public Function ValidateSavedToken(token As String) As String
                 End If
             End If
 
+        Case KIND_SEGMENT
+            ValidateSavedToken = ValidateSegmentToken(parsed.segmentId, parsed.column)
+
         Case KIND_CHART_NAMED
             specs = ScenarioOutputCharts()
             For i = LBound(specs) To UBound(specs)
@@ -283,6 +308,34 @@ Public Function ValidateSavedToken(token As String) As String
         Case Else
             ValidateSavedToken = "This token does not match any supported pattern."
     End Select
+End Function
+
+Private Function ValidateSegmentToken(segmentId As String, column As String) As String
+    Dim lo As ListObject
+
+    If Len(segmentId) = 0 Or Len(column) = 0 Then
+        ValidateSegmentToken = "A segment token needs both an ID and a column: " & _
+                               "{Segment.<ID>.<Column>}."
+        Exit Function
+    End If
+
+    Set lo = TableOrNothing(SegmentMapTableName())
+    If lo Is Nothing Then
+        ValidateSegmentToken = "Table '" & SegmentMapTableName() & "' is missing."
+    ElseIf ColumnIndexOrZero(lo, SegmentMapKeyColumn()) = 0 Then
+        ValidateSegmentToken = "Key column '" & SegmentMapKeyColumn() & "' is missing on " & _
+                               SegmentMapTableName() & "."
+    ElseIf ColumnIndexOrZero(lo, column) = 0 Then
+        ValidateSegmentToken = "Column '" & column & "' is no longer on " & _
+                               SegmentMapTableName() & "."
+    Else
+        ' Re-read so the banner reflects edits made to the table while the form is open.
+        ForgetSegmentMap
+        If Not SegmentMapHasId(segmentId) Then
+            ValidateSegmentToken = "Segment '" & segmentId & "' is no longer in " & _
+                                   SegmentMapTableName() & "."
+        End If
+    End If
 End Function
 
 Private Function ValidateInlineChart(spec As ChartSpec) As String
@@ -583,6 +636,49 @@ Public Function TableColumnChoices(tableName As String) As String()
         names(i) = lo.ListColumns(i).Name
     Next
     TableColumnChoices = names
+End Function
+
+'---------------------------------------------------------------------------------------
+' Segment picker: ID -> Column
+'---------------------------------------------------------------------------------------
+
+' Segment IDs in the segment map's own row order.
+Public Function SegmentIdChoices() As String()
+    ForgetSegmentMap
+    SegmentIdChoices = SegmentMapIds()
+End Function
+
+' Every column of the segment map except the key, in table order.
+Public Function SegmentColumnChoices() As String()
+    Dim lo As ListObject
+    Dim names() As String
+    Dim i As Long, n As Long
+
+    SegmentColumnChoices = Split(vbNullString)
+
+    Set lo = TableOrNothing(SegmentMapTableName())
+    If lo Is Nothing Then Exit Function
+    If lo.ListColumns.count < 2 Then Exit Function
+
+    ReDim names(1 To lo.ListColumns.count)
+    For i = 1 To lo.ListColumns.count
+        If StrComp(lo.ListColumns(i).Name, SegmentMapKeyColumn(), vbTextCompare) <> 0 Then
+            n = n + 1
+            names(n) = lo.ListColumns(i).Name
+        End If
+    Next i
+    If n = 0 Then Exit Function
+
+    ReDim Preserve names(1 To n)
+    SegmentColumnChoices = names
+End Function
+
+' The live value a Segment token would render, as text for the form's readout. Blank
+' until both picks are made; the missing marker when they don't resolve.
+Public Function SegmentPreview(segmentId As String, column As String) As String
+    If Len(segmentId) = 0 Or Len(column) = 0 Then Exit Function
+    ForgetSegmentMap
+    SegmentPreview = CStr(SegmentAttribute(segmentId, column, TokenMissingText()))
 End Function
 
 '=======================================================================================
