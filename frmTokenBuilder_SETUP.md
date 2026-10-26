@@ -154,6 +154,12 @@ panel:
 Don't add controls with these names in the designer; `Controls.Add` would fail
 on the duplicate name.
 
+`cboSegmentId` starts with `(all segments)`, which composes
+`{Segment.*.<Column>}`. A row holding it repeats once per segment, in the same
+order as a `(all segments)` metric row, so names and metrics line up. The
+`Value now:` readout then shows the first row's value and how many rows the
+token fills.
+
 ### Value format row (shown for Metric value, Scenario field and Segment attribute)
 
 These three controls are shared by all three value panels. The code moves them at runtime

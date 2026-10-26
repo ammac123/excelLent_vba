@@ -58,10 +58,18 @@ Option Explicit
 '   {Row.Key}                  the row's key, e.g. 42 or t1_seg1
 '   {Row.Index}                1 for the first repeated row, 2 for the next, and so on
 '   {Segment.*.<Column>}       the segment map attribute for the row's key
+'   {Segment.t1*.<Column>}     the same, for keys that fit the pattern
 '
-'   The Row and Segment.* forms only mean something on a row that also holds a
-'   wildcard metric token. A row with several wildcard tokens gets one copy per key any
-'   of them matches; a token with no metric for a copy's key shows as missing.
+'   On a row with a wildcard metric token, the metric tokens decide the rows and the
+'   Segment and Row tokens follow them. A row with only Segment wildcards repeats once
+'   per segment that has a ticked metric keyed by the segment map's key column
+'   (Pricing_Segment_ID), in catalogue order, so a column of segment names lines up
+'   row for row with a column of segment metrics. When no metric is keyed that way it
+'   falls back to the segment map's own order. The Row tokens only mean something on
+'   a wildcard row.
+'
+'   A row with several wildcard tokens gets one copy per key any of them matches; a
+'   token with nothing for a copy's key shows as missing.
 '
 '   The expansion behaves like inserting rows under the template row in Excel: content
 '   below is pushed down, formulas on the repeated row recalculate per row, and a
@@ -147,6 +155,8 @@ Option Explicit
 '       The template with every wildcard row repeated and rewritten into concrete
 '       tokens, built on a very hidden staging sheet; or the template itself when it has
 '       no wildcard rows. Paint from the result exactly as from the template.
+'   SegmentRowKeys(keyPattern)
+'       The segments a row of only {Segment.<pattern>.X} tokens repeats for, in order.
 '   IsWildcardMetricId(metricId), MatchesWildcardMetric(pattern, spec),
 '   WildcardKeyPattern(pattern, spec), WildcardMetricId(spec, keyPattern)
 '       Matching a wildcard metric ID against catalogue rows, and composing one.
@@ -684,12 +694,13 @@ Public Sub ClearExpandedTemplate()
 End Sub
 
 ' Template row number -> what that row expands into, for every row holding a wildcard
-' metric token. Each plan holds "keys" (row key -> True, in catalogue order, ticked
-' metrics only) and "ids" ("<pattern>|<key>" -> concrete metric ID, ticked or not, so a
-' token still reads its value on a row another token's ticked metric brought in).
+' metric or Segment token. Each plan holds "keys" (row key -> True, in catalogue order,
+' ticked metrics only) and "ids" ("<pattern>|<key>" -> concrete metric ID, ticked or
+' not, so a token still reads its value on a row another token's ticked metric brought
+' in).
 Private Function WildcardRowPlans(template As Range) As Object
     Dim plans As Object
-    Dim patterns As Object
+    Dim metricPatterns As Object, segmentPatterns As Object
     Dim specs() As MetricSpec
     Dim loaded As Boolean
     Dim r As Long
@@ -698,28 +709,30 @@ Private Function WildcardRowPlans(template As Range) As Object
     Set WildcardRowPlans = plans
 
     For r = 1 To template.Rows.count
-        Set patterns = RowWildcardPatterns(template.Rows(r))
-        If patterns.count > 0 Then
+        CollectRowWildcards template.Rows(r), metricPatterns, segmentPatterns
+        If metricPatterns.count > 0 Or segmentPatterns.count > 0 Then
             RequireAcrossOnlyMerges template.Rows(r)
             If Not loaded Then
                 specs = CatalogueSpecs(False)
                 loaded = True
             End If
-            plans.Add r, RowPlan(patterns, specs)
+            plans.Add r, RowPlan(metricPatterns, segmentPatterns, specs)
         End If
     Next r
 End Function
 
-' Wildcard metric IDs used anywhere on one row, in cell text or formulas.
-Private Function RowWildcardPatterns(rowCells As Range) As Object
-    Dim patterns As Object
+' The wildcard metric IDs and Segment key patterns used anywhere on one row, in cell
+' text or formulas.
+Private Sub CollectRowWildcards(rowCells As Range, ByRef metricPatterns As Object, _
+                                ByRef segmentPatterns As Object)
     Dim cell As Range
-    Dim text As String, pattern As String
+    Dim text As String, body As String, pattern As String
     Dim pos As Long, openAt As Long, closeAt As Long
 
-    Set patterns = CreateObject("Scripting.Dictionary")
-    patterns.CompareMode = 1
-    Set RowWildcardPatterns = patterns
+    Set metricPatterns = CreateObject("Scripting.Dictionary")
+    Set segmentPatterns = CreateObject("Scripting.Dictionary")
+    metricPatterns.CompareMode = 1
+    segmentPatterns.CompareMode = 1
 
     For Each cell In rowCells.Cells
         If cell.HasFormula Then text = cell.Formula Else text = CStr(cell.value)
@@ -731,15 +744,21 @@ Private Function RowWildcardPatterns(rowCells As Range) As Object
             closeAt = InStr(openAt + 1, text, TOKEN_CLOSE)
             If closeAt = 0 Then Exit Do
 
-            pattern = WildcardIdFromToken(Mid$(text, openAt + 1, closeAt - openAt - 1))
-            If Len(pattern) > 0 Then patterns(pattern) = True
+            body = Mid$(text, openAt + 1, closeAt - openAt - 1)
+            pattern = WildcardIdFromToken(body)
+            If Len(pattern) > 0 Then metricPatterns(pattern) = True
+            pattern = WildcardSegmentFromToken(body)
+            If Len(pattern) > 0 Then segmentPatterns(pattern) = True
 
             pos = closeAt + 1
         Loop
     Next cell
-End Function
+End Sub
 
-Private Function RowPlan(patterns As Object, specs() As MetricSpec) As Object
+' Metric wildcards decide the rows when there are any; the Segment tokens then follow
+' whatever keys they bring in.
+Private Function RowPlan(metricPatterns As Object, segmentPatterns As Object, _
+                         specs() As MetricSpec) As Object
     Dim plan As Object, keys As Object, ids As Object
     Dim pattern As Variant
     Dim i As Long
@@ -749,8 +768,10 @@ Private Function RowPlan(patterns As Object, specs() As MetricSpec) As Object
     keys.CompareMode = 1
     ids.CompareMode = 1
 
+    If metricPatterns.count = 0 Then AddSegmentKeys keys, segmentPatterns, specs
+
     For i = 1 To MetricSpecCount(specs)
-        For Each pattern In patterns.keys
+        For Each pattern In metricPatterns.keys
             If MatchesWildcardMetric(CStr(pattern), specs(i)) Then
                 ids(pattern & "|" & specs(i).labelValue) = specs(i).metric
                 If specs(i).include Then
@@ -764,6 +785,73 @@ Private Function RowPlan(patterns As Object, specs() As MetricSpec) As Object
     plan.Add "keys", keys
     plan.Add "ids", ids
     Set RowPlan = plan
+End Function
+
+' The segments a row of only Segment wildcards repeats for: every key of a ticked
+' metric whose row key is the segment map's key column, in catalogue order, so the row
+' lines up with a metric wildcard row over the same segments. Falls back to the segment
+' map's own order when no metric is keyed that way.
+Private Sub AddSegmentKeys(keys As Object, patterns As Object, specs() As MetricSpec)
+    Dim pattern As Variant
+    Dim ids() As String
+    Dim keyedBySegment As Boolean
+    Dim i As Long
+
+    For i = 1 To MetricSpecCount(specs)
+        If StrComp(specs(i).labelColumn, SegmentMapKeyColumn(), vbTextCompare) = 0 And _
+           Len(specs(i).labelValue) > 0 Then
+            keyedBySegment = True
+            If specs(i).include And Not keys.Exists(specs(i).labelValue) Then
+                For Each pattern In patterns.keys
+                    If KeyFitsPattern(specs(i).labelValue, CStr(pattern)) Then
+                        keys.Add specs(i).labelValue, True
+                        Exit For
+                    End If
+                Next pattern
+            End If
+        End If
+    Next i
+    If keyedBySegment Then Exit Sub
+
+    ids = SegmentMapIds()
+    For i = LBound(ids) To UBound(ids)
+        For Each pattern In patterns.keys
+            If KeyFitsPattern(ids(i), CStr(pattern)) Then
+                keys.Add ids(i), True
+                Exit For
+            End If
+        Next pattern
+    Next i
+End Sub
+
+' What a standalone {Segment.<keyPattern>.X} row repeats for, in render order.
+' An empty list comes back as Split(vbNullString), a real zero-length array.
+Public Function SegmentRowKeys(keyPattern As String) As String()
+    Dim keys As Object, patterns As Object
+    Dim specs() As MetricSpec
+    Dim out() As String
+    Dim key As Variant
+    Dim n As Long
+
+    Set keys = CreateObject("Scripting.Dictionary")
+    Set patterns = CreateObject("Scripting.Dictionary")
+    keys.CompareMode = 1
+    patterns.Add keyPattern, True
+
+    specs = CatalogueSpecs(False)
+    AddSegmentKeys keys, patterns, specs
+
+    If keys.count = 0 Then
+        SegmentRowKeys = Split(vbNullString)
+        Exit Function
+    End If
+
+    ReDim out(1 To keys.count)
+    For Each key In keys.keys
+        n = n + 1
+        out(n) = key
+    Next key
+    SegmentRowKeys = out
 End Function
 
 ' A merge running down off a wildcard row would have to be split between its copies.
@@ -879,7 +967,7 @@ Private Function ConcreteTokenBody(body As String, plan As Object, key As String
 
     If StartsWith(token, PREFIX_SEGMENT) Then
         If SplitSegmentBody(Mid$(token, Len(PREFIX_SEGMENT) + 1), segmentId, column) Then
-            If segmentId = WILDCARD Then
+            If IsWildcardMetricId(segmentId) And KeyFitsPattern(key, segmentId) Then
                 ConcreteTokenBody = Left$(token, Len(PREFIX_SEGMENT)) & key & "." & column & tail
             End If
         End If
@@ -936,6 +1024,16 @@ Private Function WildcardIdFromToken(rawToken As String) As String
         metricId = Mid$(token, Len(PREFIX_LABEL) + 1)
     End If
     If IsWildcardMetricId(metricId) Then WildcardIdFromToken = metricId
+End Function
+
+' The key pattern of a {Segment.<pattern>.<Column>} token, e.g. "*" or "t1*", or "".
+Private Function WildcardSegmentFromToken(rawToken As String) As String
+    Dim token As String, segmentId As String, column As String
+
+    token = BareToken(rawToken)
+    If Not StartsWith(token, PREFIX_SEGMENT) Then Exit Function
+    If Not SplitSegmentBody(Mid$(token, Len(PREFIX_SEGMENT) + 1), segmentId, column) Then Exit Function
+    If IsWildcardMetricId(segmentId) Then WildcardSegmentFromToken = segmentId
 End Function
 
 ' True when spec is one of the rows pattern addresses: same table prefix, same column,

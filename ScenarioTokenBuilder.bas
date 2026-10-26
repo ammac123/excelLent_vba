@@ -43,7 +43,8 @@ Option Explicit
 '   NamedChartChoices()             entries from ScenarioOutputCharts()
 '   SourceTableChoices()            every ListObject in the workbook
 '   TableColumnChoices(tableName)   that table's column names
-'   SegmentIdChoices()              segment IDs in the segment map, in table order
+'   SegmentIdChoices()              "(all segments)", then the segment IDs in the
+'                                   segment map, in table order
 '   SegmentColumnChoices()          the segment map's attribute columns
 '   SegmentPreview(segmentId, col)  the live value a Segment token would show
 '   MetricById(metricId)            the live MetricSpec for a given id, or an
@@ -138,10 +139,15 @@ Public Function ComposeScenarioToken(column As String, _
                            FormatSuffix(numberFormat) & TokenClose()
 End Function
 
+' segmentId may be METRIC_SEGMENT_ALL, which composes the "*" wildcard.
 Public Function ComposeSegmentToken(segmentId As String, column As String, _
                                     Optional numberFormat As String = "") As String
+    Dim id As String
+
     If Len(Trim$(segmentId)) = 0 Or Len(Trim$(column)) = 0 Then Exit Function
-    ComposeSegmentToken = TokenOpen() & "Segment." & Trim$(segmentId) & "." & Trim$(column) & _
+    id = SegmentPattern(Trim$(segmentId))
+    If Len(id) = 0 Then id = Trim$(segmentId)
+    ComposeSegmentToken = TokenOpen() & "Segment." & id & "." & Trim$(column) & _
                           FormatSuffix(numberFormat) & TokenClose()
 End Function
 
@@ -229,6 +235,7 @@ Public Function ParseTokenForEdit(token As String) As ParsedToken
 
     If StartsWithCI(inner, "Segment.") Then
         SplitSegmentBody Mid$(inner, Len("Segment.") + 1), segmentId, column
+        If segmentId = "*" Then segmentId = METRIC_SEGMENT_ALL
         ParseTokenForEdit.kind = KIND_SEGMENT
         ParseTokenForEdit.segmentId = segmentId
         ParseTokenForEdit.column = column
@@ -350,6 +357,7 @@ End Function
 
 Private Function ValidateSegmentToken(segmentId As String, column As String) As String
     Dim lo As ListObject
+    Dim keys() As String
 
     If Len(segmentId) = 0 Or Len(column) = 0 Then
         ValidateSegmentToken = "A segment token needs both an ID and a column: " & _
@@ -366,6 +374,13 @@ Private Function ValidateSegmentToken(segmentId As String, column As String) As 
     ElseIf ColumnIndexOrZero(lo, column) = 0 Then
         ValidateSegmentToken = "Column '" & column & "' is no longer on " & _
                                SegmentMapTableName() & "."
+    ElseIf Len(SegmentPattern(segmentId)) > 0 Then
+        ForgetSegmentMap
+        keys = SegmentRowKeys(SegmentPattern(segmentId))
+        If StringArrayCount(keys) = 0 Then
+            ValidateSegmentToken = "No segment matching '" & SegmentPattern(segmentId) & _
+                                   "' has a ticked metric, so its row renders empty."
+        End If
     Else
         ' Re-read so the banner reflects edits made to the table while the form is open.
         ForgetSegmentMap
@@ -737,9 +752,26 @@ End Function
 '---------------------------------------------------------------------------------------
 
 ' Segment IDs in the segment map's own row order.
+' "(all segments)" leads, as it does in the metric picker. It composes a row that repeats
+' once per segment, in the same order as a metric wildcard row.
 Public Function SegmentIdChoices() As String()
+    Dim ids() As String
+    Dim out() As String
+    Dim i As Long
+
     ForgetSegmentMap
-    SegmentIdChoices = SegmentMapIds()
+    ids = SegmentMapIds()
+    If StringArrayCount(ids) = 0 Then
+        SegmentIdChoices = ids
+        Exit Function
+    End If
+
+    ReDim out(1 To StringArrayCount(ids) + 1)
+    out(1) = METRIC_SEGMENT_ALL
+    For i = LBound(ids) To UBound(ids)
+        out(i - LBound(ids) + 2) = ids(i)
+    Next i
+    SegmentIdChoices = out
 End Function
 
 ' Every column of the segment map except the key, in table order.
@@ -769,10 +801,24 @@ End Function
 
 ' The live value a Segment token would render, as text for the form's readout. Blank
 ' until both picks are made; the missing marker when they don't resolve.
+' For a pattern, the first row's value and how many rows it fills.
 Public Function SegmentPreview(segmentId As String, column As String) As String
+    Dim keys() As String
+
     If Len(segmentId) = 0 Or Len(column) = 0 Then Exit Function
     ForgetSegmentMap
-    SegmentPreview = CStr(SegmentAttribute(segmentId, column, TokenMissingText()))
+    If Len(SegmentPattern(segmentId)) = 0 Then
+        SegmentPreview = CStr(SegmentAttribute(segmentId, column, TokenMissingText()))
+        Exit Function
+    End If
+
+    keys = SegmentRowKeys(SegmentPattern(segmentId))
+    If StringArrayCount(keys) = 0 Then
+        SegmentPreview = "(no matching segments)"
+    Else
+        SegmentPreview = CStr(SegmentAttribute(keys(LBound(keys)), column, TokenMissingText())) & _
+                         "  (first of " & StringArrayCount(keys) & " rows)"
+    End If
 End Function
 
 '=======================================================================================
