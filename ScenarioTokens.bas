@@ -481,11 +481,11 @@ End Function
 
 ' True when a and b differ only by floating-point noise (see DELTA_REL_TOL).
 Private Function NearlyEqual(ByVal a As Double, ByVal b As Double) As Boolean
-    Dim scale As Double
+    Dim scl As Double
 
-    scale = Abs(a)
-    If Abs(b) > scale Then scale = Abs(b)
-    NearlyEqual = (Abs(a - b) <= DELTA_ABS_TOL + DELTA_REL_TOL * scale)
+    scl = Abs(a)
+    If Abs(b) > scl Then scl = Abs(b)
+    NearlyEqual = (Abs(a - b) <= DELTA_ABS_TOL + DELTA_REL_TOL * scl)
 End Function
 
 Public Function ScenarioField(field As String, scenarioId As String, _

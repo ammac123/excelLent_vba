@@ -53,6 +53,7 @@ Public Sub PostMarginalFTP()
     If added + updated = 0 Then
         MsgBox "There is no data to post.", vbInformation
     Else
+        UpdateModelCheckForKey "Marginal FTP"
         MsgBox "Posted " & (added + updated) & " month(s) to " & TABLE_NAME & _
                " (" & added & " added, " & updated & " overwritten).", vbInformation
     End If

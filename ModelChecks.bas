@@ -280,6 +280,9 @@ Private Function LookupConfig(key As String, ByRef localTable As String, _
         Case "RFC"
             localTable = "tblRFC"
             dateColumn = "Month"
+        Case "Marginal FTP"
+            localTable = "tblMarginalFTP"
+            dateColumn = "Month"
         Case Else
             Exit Function
     End Select
