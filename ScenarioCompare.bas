@@ -27,14 +27,13 @@ Option Explicit
 ' tblScenarioComparison, with a row per metric and a column per scenario.
 '
 ' Chart tokens ({Chart:<Name>} and inline {Chart:k=v;...}, see ScenarioOutput) render
-' once per block, with two differences from the output sheet:
-'
-'   - Each chart is shrunk to fit inside its own block, so a chart sized for the output
-'     sheet can't spill over the next scenario or the grid. Give the chart room by
-'     merging the area it should fill, or by making the template bigger.
-'   - Each chart plots that block's stored results (baseline series: the current
-'     state's), not the live tables, which only ever hold the loaded scenario. A series
-'     only has data for metrics that are ticked Include and have been run.
+' once per block. As on the output sheet, each chart plots that block's stored results
+' (baseline series: the current state's), not the live tables, which only ever hold the
+' loaded scenario. A series only has data for metrics that are ticked Include and have
+' been run. Unlike the output sheet, each chart is shrunk to fit inside its own block,
+' so a chart sized for the output sheet can't spill over the next scenario or the grid.
+' Give the chart room by merging the area it should fill, or by making the template
+' bigger.
 '
 ' Everything this module writes is disposable: the generated area is cleared and rebuilt
 ' from tblScenarioResults every time, so the comparison can never drift out of step with
@@ -79,16 +78,21 @@ Public Sub BuildScenarioComparison()
     Set anchor = RequireNamedRange(CompareAnchorName())
     Set ws = anchor.Worksheet
 
-    metrics = TemplateMetricIds(template)
-
     Set results = ResultsLookup()
     LoadCatalogueMaps labels, formats, groups
 
     guard = BeginBatch("Building the scenario comparison...")
 
+    ' Wildcard rows repeated once per segment. The segment list doesn't depend on the
+    ' scenario, so every block is this same taller copy, and the grid picks up one row
+    ' per segment from its concrete tokens.
+    Set template = ExpandTemplateRows(template)
+    metrics = TemplateMetricIds(template)
+
     ClearPreviousOutput ws
     chartProblems = PaintBlocks(ws, template, anchor, ids, results, labels, formats)
     BuildComparisonGrid ws, anchor, template, ids, metrics, results, labels, formats, groups
+    ClearExpandedTemplate
     ' Template formulas are written while calculation is manual, so settle them here
     ' rather than leaving the sheet full of stale results.
     ws.Calculate
@@ -493,7 +497,8 @@ Private Function PaintBlocks(ws As Worksheet, template As Range, anchor As Range
         FillTokens dest, ids(i), i, results, labels, formats
 
         ' The block index keeps chart names unique across blocks.
-        problems = RenderChartTokens(ws, dest, CHART_NAME_PREFIX & i & "_", True, ids(i), results)
+        problems = RenderChartTokens(ws, dest, CHART_NAME_PREFIX & i & "_", True, ids(i), _
+                                     results, COMPARE_STAGING_SHEET)
         If Len(problems) > 0 Then
             allProblems = allProblems & ScenarioName(ids(i)) & ":" & vbNewLine & problems
         End If
@@ -628,7 +633,7 @@ Private Sub ClearPreviousOutput(ws As Worksheet)
 
     ' Charts before the data they plot, and both before the cells they sit over.
     DeleteRenderedCharts ws, CHART_NAME_PREFIX
-    ClearStagedChartData
+    ClearStagedChartData COMPARE_STAGING_SHEET
 
     ' Unlist first so the comparison table's style is no longer "owned" by a live
     ' ListObject; once detached, Clear/ClearFormats can actually reset the cells.

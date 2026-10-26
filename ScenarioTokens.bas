@@ -40,6 +40,34 @@ Option Explicit
 '                              Read live, and the same in every scenario's block. An
 '                              unknown ID or column resolves like a missing metric.
 '
+' Wildcard rows (one row of tokens that fills a whole column of segments):
+'
+'   {Metric.MetricsOutSegment_*_NIM}
+'                              A "*" in the metric ID of a Metric, Label, Current, Delta
+'                              or DeltaPct token stands for the row key: the segment,
+'                              product or month the metric's source row is keyed by. The
+'                              template row holding it repeats once per matching key, in
+'                              catalogue order (the source table's own row order), and
+'                              each copy reads that key's metric. Only keys whose metric
+'                              is ticked Include get a row.
+'   {Metric.MetricsOutProduct_t1*_Balance}
+'                              The "*" can sit inside a key: this repeats for t1_seg1 and
+'                              t1_seg2 but not t2_seg3. Only "*" is special. The table
+'                              prefix and the column must still match exactly, so _*_NIM
+'                              never picks up an Adj_NIM column.
+'   {Row.Key}                  the row's key, e.g. 42 or t1_seg1
+'   {Row.Index}                1 for the first repeated row, 2 for the next, and so on
+'   {Segment.*.<Column>}       the segment map attribute for the row's key
+'
+'   The Row and Segment.* forms only mean something on a row that also holds a
+'   wildcard metric token. A row with several wildcard tokens gets one copy per key any
+'   of them matches; a token with no metric for a copy's key shows as missing.
+'
+'   The expansion behaves like inserting rows under the template row in Excel: content
+'   below is pushed down, formulas on the repeated row recalculate per row, and a
+'   formula below that pointed at the template row (=SUM(C5:C5)) still points at the
+'   first copy only. Cells on a wildcard row may be merged across, but not down.
+'
 ' Unknown tokens are left exactly as written, so braces used for other purposes survive
 ' untouched.
 '
@@ -115,6 +143,13 @@ Option Explicit
 '       The IDs in the segment map, and whether one is there.
 '   ForgetSegmentMap
 '       Drops the cached segment map so the next lookup re-reads the table.
+'   ExpandTemplateRows(template), ClearExpandedTemplate
+'       The template with every wildcard row repeated and rewritten into concrete
+'       tokens, built on a very hidden staging sheet; or the template itself when it has
+'       no wildcard rows. Paint from the result exactly as from the template.
+'   IsWildcardMetricId(metricId), MatchesWildcardMetric(pattern, spec),
+'   WildcardKeyPattern(pattern, spec), WildcardMetricId(spec, keyPattern)
+'       Matching a wildcard metric ID against catalogue rows, and composing one.
 
 Private Const TOKEN_OPEN As String = "{"
 Private Const TOKEN_CLOSE As String = "}"
@@ -126,8 +161,12 @@ Private Const PREFIX_CURRENT As String = "Current."
 Private Const PREFIX_DELTA As String = "Delta."
 Private Const PREFIX_DELTA_PCT As String = "DeltaPct."
 Private Const PREFIX_SEGMENT As String = "Segment."
+Private Const TOKEN_ROW_KEY As String = "Row.Key"
+Private Const TOKEN_ROW_INDEX As String = "Row.Index"
+Private Const WILDCARD As String = "*"
 
 Private Const MISSING_VALUE As String = "n/a"
+Private Const STAGING_SHEET As String = "TemplateStaging"
 
 ' The segment map, read once and reused for every Segment token until ForgetSegmentMap.
 ' FillTokens forgets it at the start of each block, so a build always sees the live table
@@ -200,6 +239,15 @@ End Sub
 
 ' The token when the cell's entire contents are "{...}", otherwise an empty string.
 Public Function WholeCellToken(text As String) As String
+    Dim body As String
+
+    body = WholeCellBody(text)
+    If Len(body) = 0 Then Exit Function
+    If IsKnownToken(body) Then WholeCellToken = body
+End Function
+
+' What sits between the braces when the cell is nothing but "{...}", recognised or not.
+Private Function WholeCellBody(text As String) As String
     Dim trimmed As String
 
     trimmed = Trim$(text)
@@ -207,8 +255,7 @@ Public Function WholeCellToken(text As String) As String
     If Left$(trimmed, 1) <> TOKEN_OPEN Or Right$(trimmed, 1) <> TOKEN_CLOSE Then Exit Function
     If InStr(trimmed, TOKEN_CLOSE) <> Len(trimmed) Then Exit Function
 
-    trimmed = Trim$(Mid$(trimmed, 2, Len(trimmed) - 2))
-    If IsKnownToken(trimmed) Then WholeCellToken = trimmed
+    WholeCellBody = Trim$(Mid$(trimmed, 2, Len(trimmed) - 2))
 End Function
 
 ' Rewrites every recognised token in a piece of text or formula. Tokens that are not ours
@@ -520,6 +567,8 @@ Public Function TemplateMetricIds(template As Range) As String()
 
             token = Trim$(Mid$(text, openAt + 1, closeAt - openAt - 1))
             metricId = MetricIdFromToken(token)
+            ' A wildcard left behind on a row with no matches names no real metric.
+            If IsWildcardMetricId(metricId) Then metricId = ""
             If Len(metricId) > 0 Then
                 If Not seen.Exists(metricId) Then
                     seen.Add metricId, True
@@ -553,6 +602,412 @@ Public Function MetricIdFromToken(rawToken As String) As String
     ElseIf StartsWith(token, PREFIX_DELTA) Then
         MetricIdFromToken = Mid$(token, Len(PREFIX_DELTA) + 1)
     End If
+End Function
+
+'=======================================================================================
+' Wildcard rows
+'=======================================================================================
+
+' The template ready to paint: each wildcard row repeated once per key and rewritten into
+' concrete tokens. The copy sits on a very hidden staging sheet at the template's own
+' address, so every formula reads exactly as it would have in the template. A template
+' with no wildcard rows comes back untouched and the staging sheet is never created.
+Public Function ExpandTemplateRows(template As Range) As Range
+    Dim plans As Object
+    Dim plan As Object
+    Dim stage As Worksheet
+    Dim keys As Variant
+    Dim topRow As Long, leftCol As Long, cols As Long, rowCount As Long
+    Dim r As Long, at As Long, n As Long, i As Long
+
+    Set plans = WildcardRowPlans(template)
+    If plans.count = 0 Then
+        Set ExpandTemplateRows = template
+        Exit Function
+    End If
+
+    topRow = template.Row
+    leftCol = template.column
+    cols = template.Columns.count
+    rowCount = template.Rows.count
+
+    Set stage = TemplateStagingSheet()
+    stage.Cells.Clear
+    template.Copy stage.Cells(topRow, leftCol)
+    For i = 1 To cols
+        stage.Columns(leftCol + i - 1).ColumnWidth = template.Columns(i).ColumnWidth
+    Next i
+    For r = 1 To rowCount
+        stage.Rows(topRow + r - 1).RowHeight = template.Rows(r).RowHeight
+    Next r
+
+    ' Bottom up, so the rows still to expand keep their positions.
+    For r = template.Rows.count To 1 Step -1
+        If plans.Exists(r) Then
+            Set plan = plans(r)
+            at = topRow + r - 1
+            n = plan("keys").count
+
+            ' Real row inserts, so formulas below the row adjust the way they would if
+            ' the rows had been inserted by hand.
+            If n > 1 Then
+                stage.Rows(at + 1).Resize(n - 1).Insert Shift:=xlDown
+                stage.Cells(at, leftCol).Resize(1, cols).Copy _
+                    stage.Cells(at + 1, leftCol).Resize(n - 1, cols)
+                stage.Rows(at + 1).Resize(n - 1).RowHeight = stage.Rows(at).RowHeight
+                rowCount = rowCount + n - 1
+            End If
+
+            If n = 0 Then
+                RewriteWildcardRow stage.Cells(at, leftCol).Resize(1, cols), plan, "", 0
+            Else
+                keys = plan("keys").keys
+                For i = 1 To n
+                    RewriteWildcardRow stage.Cells(at + i - 1, leftCol).Resize(1, cols), _
+                                       plan, CStr(keys(i - 1)), i
+                Next i
+            End If
+        End If
+    Next r
+
+    Application.CutCopyMode = False
+    Set ExpandTemplateRows = stage.Cells(topRow, leftCol).Resize(rowCount, cols)
+End Function
+
+' Empties the staging sheet so the expanded copy stops recalculating. Call once the
+' blocks have been painted from it.
+Public Sub ClearExpandedTemplate()
+    Dim stage As Worksheet
+
+    Set stage = SheetOrNothing(STAGING_SHEET)
+    If Not stage Is Nothing Then stage.Cells.Clear
+End Sub
+
+' Template row number -> what that row expands into, for every row holding a wildcard
+' metric token. Each plan holds "keys" (row key -> True, in catalogue order, ticked
+' metrics only) and "ids" ("<pattern>|<key>" -> concrete metric ID, ticked or not, so a
+' token still reads its value on a row another token's ticked metric brought in).
+Private Function WildcardRowPlans(template As Range) As Object
+    Dim plans As Object
+    Dim patterns As Object
+    Dim specs() As MetricSpec
+    Dim loaded As Boolean
+    Dim r As Long
+
+    Set plans = CreateObject("Scripting.Dictionary")
+    Set WildcardRowPlans = plans
+
+    For r = 1 To template.Rows.count
+        Set patterns = RowWildcardPatterns(template.Rows(r))
+        If patterns.count > 0 Then
+            RequireAcrossOnlyMerges template.Rows(r)
+            If Not loaded Then
+                specs = CatalogueSpecs(False)
+                loaded = True
+            End If
+            plans.Add r, RowPlan(patterns, specs)
+        End If
+    Next r
+End Function
+
+' Wildcard metric IDs used anywhere on one row, in cell text or formulas.
+Private Function RowWildcardPatterns(rowCells As Range) As Object
+    Dim patterns As Object
+    Dim cell As Range
+    Dim text As String, pattern As String
+    Dim pos As Long, openAt As Long, closeAt As Long
+
+    Set patterns = CreateObject("Scripting.Dictionary")
+    patterns.CompareMode = 1
+    Set RowWildcardPatterns = patterns
+
+    For Each cell In rowCells.Cells
+        If cell.HasFormula Then text = cell.Formula Else text = CStr(cell.value)
+
+        pos = 1
+        Do
+            openAt = InStr(pos, text, TOKEN_OPEN)
+            If openAt = 0 Then Exit Do
+            closeAt = InStr(openAt + 1, text, TOKEN_CLOSE)
+            If closeAt = 0 Then Exit Do
+
+            pattern = WildcardIdFromToken(Mid$(text, openAt + 1, closeAt - openAt - 1))
+            If Len(pattern) > 0 Then patterns(pattern) = True
+
+            pos = closeAt + 1
+        Loop
+    Next cell
+End Function
+
+Private Function RowPlan(patterns As Object, specs() As MetricSpec) As Object
+    Dim plan As Object, keys As Object, ids As Object
+    Dim pattern As Variant
+    Dim i As Long
+
+    Set keys = CreateObject("Scripting.Dictionary")
+    Set ids = CreateObject("Scripting.Dictionary")
+    keys.CompareMode = 1
+    ids.CompareMode = 1
+
+    For i = 1 To MetricSpecCount(specs)
+        For Each pattern In patterns.keys
+            If MatchesWildcardMetric(CStr(pattern), specs(i)) Then
+                ids(pattern & "|" & specs(i).labelValue) = specs(i).metric
+                If specs(i).include Then
+                    If Not keys.Exists(specs(i).labelValue) Then keys.Add specs(i).labelValue, True
+                End If
+            End If
+        Next pattern
+    Next i
+
+    Set plan = CreateObject("Scripting.Dictionary")
+    plan.Add "keys", keys
+    plan.Add "ids", ids
+    Set RowPlan = plan
+End Function
+
+' A merge running down off a wildcard row would have to be split between its copies.
+Private Sub RequireAcrossOnlyMerges(rowCells As Range)
+    Dim cell As Range
+
+    If Not IsNull(rowCells.MergeCells) Then
+        If Not rowCells.MergeCells Then Exit Sub
+    End If
+
+    For Each cell In rowCells.Cells
+        If cell.MergeCells Then
+            If cell.MergeArea.Rows.count > 1 Then
+                Err.Raise vbObjectError + 770, "ScenarioTokens", _
+                          "Template row " & rowCells.Row & " on " & rowCells.Worksheet.Name & _
+                          " repeats once per segment, so its cells can only be merged " & _
+                          "across, not down. Unmerge " & _
+                          cell.MergeArea.Address(False, False) & "."
+            End If
+        End If
+    Next cell
+End Sub
+
+' One copy of a wildcard row rewritten for one key: wildcard metric tokens become that
+' key's metric, {Segment.*.X} becomes {Segment.<key>.X} and the Row tokens become
+' literals. index is 0 for the single blank copy left when nothing matched.
+Private Sub RewriteWildcardRow(rowCells As Range, plan As Object, key As String, _
+                               ByVal index As Long)
+    Dim cell As Range
+    Dim text As String, token As String, tokenFormat As String
+
+    For Each cell In rowCells.Cells
+        If cell.HasFormula Then
+            text = cell.Formula
+            If InStr(text, TOKEN_OPEN) > 0 Then
+                cell.Formula = RowTokensReplaced(text, True, plan, key, index)
+            End If
+        Else
+            text = CStr(cell.value)
+            If InStr(text, TOKEN_OPEN) > 0 Then
+                token = SplitTokenFormat(WholeCellBody(text), tokenFormat)
+                If IsRowToken(token) Then
+                    ' Written as if typed, so a numeric segment ID lands as a number.
+                    cell.value = RowTokenValue(token, key, index)
+                    If Len(tokenFormat) > 0 Then TrySetNumberFormat cell, tokenFormat
+                Else
+                    cell.value = RowTokensReplaced(text, False, plan, key, index)
+                End If
+            End If
+        End If
+    Next cell
+End Sub
+
+Private Function RowTokensReplaced(text As String, ByVal asFormula As Boolean, _
+                                   plan As Object, key As String, _
+                                   ByVal index As Long) As String
+    Dim out As String
+    Dim body As String, token As String, tokenFormat As String
+    Dim pos As Long, openAt As Long, closeAt As Long
+
+    pos = 1
+    Do
+        openAt = InStr(pos, text, TOKEN_OPEN)
+        If openAt = 0 Then Exit Do
+        closeAt = InStr(openAt + 1, text, TOKEN_CLOSE)
+        If closeAt = 0 Then Exit Do
+
+        out = out & Mid$(text, pos, openAt - pos)
+        body = Mid$(text, openAt + 1, closeAt - openAt - 1)
+        token = SplitTokenFormat(body, tokenFormat)
+
+        If IsRowToken(token) Then
+            If asFormula Then
+                out = out & FormulaLiteral(RowTokenValue(token, key, index))
+            Else
+                out = out & FormattedText(RowTokenValue(token, key, index), tokenFormat)
+            End If
+        Else
+            out = out & TOKEN_OPEN & ConcreteTokenBody(body, plan, key) & TOKEN_CLOSE
+        End If
+
+        pos = closeAt + 1
+    Loop
+
+    RowTokensReplaced = out & Mid$(text, pos)
+End Function
+
+' One token body rewritten for one key, keeping its prefix and "|format" suffix exactly
+' as typed. A wildcard with no metric for this key is left as it is, and so resolves as
+' missing; anything that is not a wildcard comes back unchanged.
+Private Function ConcreteTokenBody(body As String, plan As Object, key As String) As String
+    Dim ids As Object
+    Dim token As String, tail As String, pattern As String
+    Dim segmentId As String, column As String
+    Dim cut As Long
+
+    ConcreteTokenBody = body
+    If Len(key) = 0 Then Exit Function
+
+    token = BareToken(body)
+    cut = InStr(body, FORMAT_SEPARATOR)
+    If cut > 0 Then tail = Mid$(body, cut)
+
+    pattern = WildcardIdFromToken(token)
+    If Len(pattern) > 0 Then
+        Set ids = plan("ids")
+        If ids.Exists(pattern & "|" & key) Then
+            ConcreteTokenBody = Left$(token, Len(token) - Len(pattern)) & _
+                                ids(pattern & "|" & key) & tail
+        End If
+        Exit Function
+    End If
+
+    If StartsWith(token, PREFIX_SEGMENT) Then
+        If SplitSegmentBody(Mid$(token, Len(PREFIX_SEGMENT) + 1), segmentId, column) Then
+            If segmentId = WILDCARD Then
+                ConcreteTokenBody = Left$(token, Len(PREFIX_SEGMENT)) & key & "." & column & tail
+            End If
+        End If
+    End If
+End Function
+
+Private Function IsRowToken(token As String) As Boolean
+    IsRowToken = (StrComp(token, TOKEN_ROW_KEY, vbTextCompare) = 0) Or _
+                 (StrComp(token, TOKEN_ROW_INDEX, vbTextCompare) = 0)
+End Function
+
+' Blank on the copy left when nothing matched.
+Private Function RowTokenValue(token As String, key As String, ByVal index As Long) As Variant
+    If index = 0 Then
+        RowTokenValue = ""
+    ElseIf StrComp(token, TOKEN_ROW_INDEX, vbTextCompare) = 0 Then
+        RowTokenValue = index
+    Else
+        RowTokenValue = key
+    End If
+End Function
+
+' Created on first use and kept very hidden, so it never shows in the sheet tabs or the
+' Unhide dialog.
+Private Function TemplateStagingSheet() As Worksheet
+    Dim stage As Worksheet
+
+    Set stage = SheetOrNothing(STAGING_SHEET)
+    If stage Is Nothing Then
+        Set stage = ThisWorkbook.Worksheets.Add( _
+            After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.count))
+        stage.Name = STAGING_SHEET
+        stage.Visible = xlSheetVeryHidden
+    End If
+
+    Set TemplateStagingSheet = stage
+End Function
+
+'---------------------------------------------------------------------------------------
+' Matching wildcard metric IDs
+'---------------------------------------------------------------------------------------
+
+Public Function IsWildcardMetricId(metricId As String) As Boolean
+    IsWildcardMetricId = (InStr(metricId, WILDCARD) > 0)
+End Function
+
+' The wildcard metric ID inside a Metric, Label, Current, Delta or DeltaPct token, or "".
+Private Function WildcardIdFromToken(rawToken As String) As String
+    Dim token As String, metricId As String
+
+    token = BareToken(rawToken)
+    metricId = MetricIdFromToken(token)
+    If Len(metricId) = 0 And StartsWith(token, PREFIX_LABEL) Then
+        metricId = Mid$(token, Len(PREFIX_LABEL) + 1)
+    End If
+    If IsWildcardMetricId(metricId) Then WildcardIdFromToken = metricId
+End Function
+
+' True when spec is one of the rows pattern addresses: same table prefix, same column,
+' and a row key that fits the pattern's key part.
+Public Function MatchesWildcardMetric(pattern As String, spec As MetricSpec) As Boolean
+    Dim keyPattern As String
+
+    keyPattern = WildcardKeyPattern(pattern, spec)
+    If Len(keyPattern) = 0 Then Exit Function
+    MatchesWildcardMetric = KeyFitsPattern(spec.labelValue, keyPattern)
+End Function
+
+' The part of pattern standing in for spec's row key, e.g. "t1*" from
+' "MetricsOutProduct_t1*_Balance" against any Balance metric of tblMetricsOutProduct.
+' "" when pattern addresses another table or column, or has no "*" in its key part.
+Public Function WildcardKeyPattern(pattern As String, spec As MetricSpec) As String
+    Dim prefix As String, suffix As String
+    Dim keyPattern As String
+
+    If Not SplitMetricId(spec, prefix, suffix) Then Exit Function
+    If Len(pattern) <= Len(prefix) + Len(suffix) Then Exit Function
+    If StrComp(Left$(pattern, Len(prefix)), prefix, vbTextCompare) <> 0 Then Exit Function
+    If StrComp(Right$(pattern, Len(suffix)), suffix, vbTextCompare) <> 0 Then Exit Function
+
+    keyPattern = Mid$(pattern, Len(prefix) + 1, Len(pattern) - Len(prefix) - Len(suffix))
+    If IsWildcardMetricId(keyPattern) Then WildcardKeyPattern = keyPattern
+End Function
+
+' spec's own metric ID with its row key swapped for keyPattern, or "" when spec has no
+' row key to swap (a named range or a single-row table).
+Public Function WildcardMetricId(spec As MetricSpec, keyPattern As String) As String
+    Dim prefix As String, suffix As String
+
+    If SplitMetricId(spec, prefix, suffix) Then WildcardMetricId = prefix & keyPattern & suffix
+End Function
+
+' Splits a metric ID around its row key: "MetricsOutSegment_" & "42" & "_NIM". Read off
+' the ID rather than rebuilt from the table name, so a hand-typed catalogue row works
+' too, as long as its ID ends in "<key>_<column>".
+Private Function SplitMetricId(spec As MetricSpec, ByRef prefix As String, _
+                               ByRef suffix As String) As Boolean
+    Dim keyAt As Long
+
+    If Len(spec.labelValue) = 0 Or Len(spec.sourceColumn) = 0 Then Exit Function
+
+    suffix = "_" & spec.sourceColumn
+    keyAt = Len(spec.metric) - Len(suffix) - Len(spec.labelValue) + 1
+    If keyAt < 1 Then Exit Function
+    If StrComp(Right$(spec.metric, Len(suffix)), suffix, vbTextCompare) <> 0 Then Exit Function
+    If StrComp(Mid$(spec.metric, keyAt, Len(spec.labelValue)), spec.labelValue, _
+               vbTextCompare) <> 0 Then Exit Function
+
+    prefix = Left$(spec.metric, keyAt - 1)
+    SplitMetricId = True
+End Function
+
+' Like, with "*" the only special character: a "?", "#" or "[" in a key matches itself.
+Private Function KeyFitsPattern(key As String, keyPattern As String) As Boolean
+    Dim likePattern As String, ch As String
+    Dim i As Long
+
+    For i = 1 To Len(keyPattern)
+        ch = Mid$(keyPattern, i, 1)
+        Select Case ch
+            Case "?", "#", "["
+                likePattern = likePattern & "[" & ch & "]"
+            Case Else
+                likePattern = likePattern & ch
+        End Select
+    Next i
+
+    KeyFitsPattern = (LCase$(key) Like LCase$(likePattern))
 End Function
 
 '=======================================================================================

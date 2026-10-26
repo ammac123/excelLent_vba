@@ -63,6 +63,7 @@ Public Const KIND_UNKNOWN As String = "Unknown"
 ' Placeholder keys for the metric picker; see "Metric picker" below.
 Public Const METRIC_SOURCE_NAMED As String = "(named ranges)"
 Public Const METRIC_SEGMENT_NONE As String = "(no segment)"
+Public Const METRIC_SEGMENT_ALL As String = "(all segments)"
 
 Public Type ParsedToken
     kind As String          ' one of the KIND_* constants
@@ -283,7 +284,9 @@ Public Function ValidateSavedToken(token As String) As String
 
     Select Case parsed.kind
         Case KIND_METRIC, KIND_CURRENT, KIND_DELTA, KIND_DELTA_PCT, KIND_LABEL
-            If Len(MetricById(parsed.metricId).metric) = 0 Then
+            If IsWildcardMetricId(parsed.metricId) Then
+                ValidateSavedToken = ValidateWildcardMetric(parsed.metricId)
+            ElseIf Len(MetricById(parsed.metricId).metric) = 0 Then
                 ValidateSavedToken = "Metric '" & parsed.metricId & _
                                      "' is no longer in the catalogue."
             End If
@@ -320,6 +323,29 @@ Public Function ValidateSavedToken(token As String) As String
         Case Else
             ValidateSavedToken = "This token does not match any supported pattern."
     End Select
+End Function
+
+' A wildcard row renders one copy per ticked match, so matches that are all unticked
+' would leave a single blank row.
+Private Function ValidateWildcardMetric(pattern As String) As String
+    Dim specs() As MetricSpec
+    Dim matched As Boolean
+    Dim i As Long
+
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If MatchesWildcardMetric(pattern, specs(i)) Then
+            If specs(i).include Then Exit Function
+            matched = True
+        End If
+    Next i
+
+    If matched Then
+        ValidateWildcardMetric = "Every metric matching '" & pattern & "' is unticked in " & _
+                                 MetricCatalogueTableName() & ", so its row renders empty."
+    Else
+        ValidateWildcardMetric = "No metric in the catalogue matches '" & pattern & "'."
+    End If
 End Function
 
 Private Function ValidateSegmentToken(segmentId As String, column As String) As String
@@ -408,13 +434,27 @@ End Function
 
 ' Returns the live MetricSpec for metricId, or a zero-filled spec when the metric is
 ' not in the catalogue. Callers test via Len(result.metric).
+'
+' A wildcard ID (see ScenarioTokens) comes back as its first match with the row key
+' swapped for the key pattern, so the picker reads it as (all segments) or "t1*" and
+' the readout shows e.g. "* NIM".
 Public Function MetricById(metricId As String) As MetricSpec
     Dim specs() As MetricSpec
+    Dim keyPattern As String
     Dim i As Long
 
     specs = CatalogueSpecs(False)
     For i = 1 To MetricSpecCount(specs)
-        If StrComp(specs(i).metric, metricId, vbTextCompare) = 0 Then
+        If IsWildcardMetricId(metricId) Then
+            If MatchesWildcardMetric(metricId, specs(i)) Then
+                keyPattern = WildcardKeyPattern(metricId, specs(i))
+                MetricById = specs(i)
+                MetricById.metric = metricId
+                MetricById.labelValue = keyPattern
+                MetricById.label = keyPattern & " " & specs(i).sourceColumn
+                Exit Function
+            End If
+        ElseIf StrComp(specs(i).metric, metricId, vbTextCompare) = 0 Then
             MetricById = specs(i)
             Exit Function
         End If
@@ -435,9 +475,15 @@ End Function
 ' Metrics that don't fit that shape still get a place: named-range metrics sit under
 ' a "(named ranges)" source and use their metric ID as the type, and single-row tables
 ' with no label column use "(no segment)". The three Key functions are the only place
-' that mapping lives, so the lists and MetricIdFor can't disagree. The two placeholder
-' constants (METRIC_SOURCE_NAMED, METRIC_SEGMENT_NONE) are declared at the top of the
-' module, since VBA won't accept module-level declarations after the first procedure.
+' that mapping lives, so the lists and MetricIdFor can't disagree. The placeholder
+' constants (METRIC_SOURCE_NAMED, METRIC_SEGMENT_NONE, METRIC_SEGMENT_ALL) are declared at
+' the top of the module, since VBA won't accept module-level declarations after the
+' first procedure.
+'
+' A source with row keys also offers "(all segments)" at the top of the Segment list,
+' which composes a wildcard token ({Metric.MetricsOutSegment_*_NIM}) whose template row
+' repeats once per segment. A segment value holding a "*", such as "t1*" from editing a
+' hand-typed token, is treated as a key pattern the same way.
 
 Public Function MetricSourceKey(m As MetricSpec) As String
     If Len(m.sourceTable) = 0 Then
@@ -450,6 +496,8 @@ End Function
 Public Function MetricSegmentKey(m As MetricSpec) As String
     If Len(m.labelValue) = 0 Then
         MetricSegmentKey = METRIC_SEGMENT_NONE
+    ElseIf m.labelValue = "*" Then
+        MetricSegmentKey = METRIC_SEGMENT_ALL
     Else
         MetricSegmentKey = m.labelValue
     End If
@@ -481,7 +529,9 @@ End Function
 ' table's row order, so segments read in the same order as the sheet).
 Public Function MetricSegmentChoices(source As String) As String()
     Dim specs() As MetricSpec
-    Dim seen As Object
+    Dim seen As Object, choices As Object
+    Dim key As Variant
+    Dim wildcardable As Boolean
     Dim i As Long
 
     Set seen = NewTextSet()
@@ -489,9 +539,17 @@ Public Function MetricSegmentChoices(source As String) As String()
     For i = 1 To MetricSpecCount(specs)
         If KeyMatches(MetricSourceKey(specs(i)), source) Then
             AddDistinct seen, MetricSegmentKey(specs(i))
+            If Len(WildcardMetricId(specs(i), "*")) > 0 Then wildcardable = True
         End If
     Next i
-    MetricSegmentChoices = TextSetToArray(seen, False)
+
+    ' "(all segments)" leads, so it sits above a long list of IDs.
+    Set choices = NewTextSet()
+    If wildcardable Then AddDistinct choices, METRIC_SEGMENT_ALL
+    For Each key In seen.keys
+        AddDistinct choices, CStr(key)
+    Next key
+    MetricSegmentChoices = TextSetToArray(choices, False)
 End Function
 
 ' Distinct metric types for one source + segment, in catalogue (column) order.
@@ -504,7 +562,7 @@ Public Function MetricTypeChoices(source As String, segment As String) As String
     specs = CatalogueSpecs(False)
     For i = 1 To MetricSpecCount(specs)
         If KeyMatches(MetricSourceKey(specs(i)), source) And _
-           KeyMatches(MetricSegmentKey(specs(i)), segment) Then
+           SegmentMatches(specs(i), segment) Then
             AddDistinct seen, MetricTypeKey(specs(i))
         End If
     Next i
@@ -512,7 +570,7 @@ Public Function MetricTypeChoices(source As String, segment As String) As String
 End Function
 
 ' The metric ID the three picks point at, or "" until all three resolve to a
-' catalogue entry.
+' catalogue entry. A segment pattern gives the wildcard ID instead.
 Public Function MetricIdFor(source As String, segment As String, metricType As String) As String
     Dim specs() As MetricSpec
     Dim i As Long
@@ -522,12 +580,36 @@ Public Function MetricIdFor(source As String, segment As String, metricType As S
     specs = CatalogueSpecs(False)
     For i = 1 To MetricSpecCount(specs)
         If KeyMatches(MetricSourceKey(specs(i)), source) And _
-           KeyMatches(MetricSegmentKey(specs(i)), segment) And _
+           SegmentMatches(specs(i), segment) And _
            KeyMatches(MetricTypeKey(specs(i)), metricType) Then
-            MetricIdFor = specs(i).metric
+            If Len(SegmentPattern(segment)) = 0 Then
+                MetricIdFor = specs(i).metric
+            Else
+                MetricIdFor = WildcardMetricId(specs(i), SegmentPattern(segment))
+            End If
             Exit Function
         End If
     Next i
+End Function
+
+' The key pattern a Segment pick stands for, or "" for a single segment.
+Private Function SegmentPattern(segment As String) As String
+    If KeyMatches(segment, METRIC_SEGMENT_ALL) Then
+        SegmentPattern = "*"
+    ElseIf IsWildcardMetricId(segment) Then
+        SegmentPattern = segment
+    End If
+End Function
+
+Private Function SegmentMatches(m As MetricSpec, segment As String) As Boolean
+    Dim pattern As String
+
+    pattern = SegmentPattern(segment)
+    If Len(pattern) = 0 Then
+        SegmentMatches = KeyMatches(MetricSegmentKey(m), segment)
+    Else
+        SegmentMatches = MatchesWildcardMetric(WildcardMetricId(m, pattern), m)
+    End If
 End Function
 
 Private Function KeyMatches(a As String, b As String) As Boolean

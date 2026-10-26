@@ -12,6 +12,10 @@ Option Explicit
 '   Last_Refreshed   when the import ran (same value as SourceLastImportedOn)
 '   Data_Up_To       the newest date in the imported local table
 '   Refreshed_By       Application.UserName at the time of the import
+'
+' ConfirmModelCheck records a manual sign-off for checks not tied to an import
+' (e.g. "rates reviewed"). It writes only Last_Refreshed and Refreshed_By; use
+' keys that don't collide with the import keys in LookupConfig.
 
 Private Const CHECKS_TABLE As String = "tblModelChecks"
 
@@ -42,6 +46,59 @@ Public Sub UpdateModelCheckForKey(key As String)
     CellInRow(lo, rowIdx, COL_LAST_REFRESHED).value = SourceLastImportedOn(key)
     CellInRow(lo, rowIdx, COL_DATA_UP_TO).value = MaxDateInTable(localTable, dateColumn)
     CellInRow(lo, rowIdx, COL_REFRESHED_BY).value = Application.UserName
+End Sub
+
+' Asks the user to confirm, then stamps the row for key with the current time
+' and user. Returns False if the user declines or the table is missing, so a
+' calling process can stop: If Not ConfirmModelCheck("X") Then Exit Sub
+Public Function ConfirmModelCheck(key As String, _
+                                  Optional prompt As String = "") As Boolean
+    Dim lo As ListObject
+    Dim rowIdx As Long
+
+    If Len(prompt) = 0 Then prompt = "Confirm '" & key & "' has been checked?"
+    If MsgBox(prompt, vbYesNo + vbQuestion, "Model check") <> vbYes Then Exit Function
+
+    Set lo = TableOrNothing(CHECKS_TABLE)
+    If lo Is Nothing Then
+        MsgBox "Table " & CHECKS_TABLE & " not found; check not recorded.", vbExclamation
+        Exit Function
+    End If
+
+    rowIdx = FindOrAppendRow(lo, key)
+    CellInRow(lo, rowIdx, COL_LAST_REFRESHED).value = Now
+    CellInRow(lo, rowIdx, COL_REFRESHED_BY).value = Application.UserName
+    ConfirmModelCheck = True
+End Function
+
+' Button entry point: confirms the tblModelChecks row the active cell is in.
+Public Sub ConfirmSelectedModelCheck()
+    Dim lo As ListObject
+    Dim keyCol As Long
+    Dim rowIdx As Long
+    Dim key As String
+
+    Set lo = TableOrNothing(CHECKS_TABLE)
+    If lo Is Nothing Then Exit Sub
+
+    If lo.DataBodyRange Is Nothing Then Exit Sub
+    If ActiveCell.Worksheet.Name <> lo.Parent.Name Then
+        MsgBox "Select a row in " & CHECKS_TABLE & " first.", vbInformation
+        Exit Sub
+    End If
+    If Intersect(ActiveCell, lo.DataBodyRange) Is Nothing Then
+        MsgBox "Select a row in " & CHECKS_TABLE & " first.", vbInformation
+        Exit Sub
+    End If
+
+    keyCol = ColumnIndexOrZero(lo, COL_KEY)
+    If keyCol = 0 Then Exit Sub
+
+    rowIdx = ActiveCell.Row - lo.DataBodyRange.Row + 1
+    key = CStr(lo.DataBodyRange.Cells(rowIdx, keyCol).value)
+    If Len(key) = 0 Then Exit Sub
+
+    ConfirmModelCheck key
 End Sub
 
 ' Keys without a config entry are ignored, so a new import type that forgets to

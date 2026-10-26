@@ -117,6 +117,14 @@ list with a single option fills itself in. Metrics that come from a named range
 rather than a table appear under the source `(named ranges)`, and single-row
 tables use the segment `(no segment)`.
 
+A table with row keys also lists `(all segments)` at the top of the Segment
+list. That composes a wildcard token such as `{Metric.MetricsOutSegment_*_NIM}`:
+the template row holding it repeats once per segment when the sheet is built
+(see the "Wildcard rows" notes at the top of `ScenarioTokens.bas`). Patterns
+that cover only part of the key, like `t1*`, are typed into the cell by hand;
+Edit on a saved one shows the pattern in the Segment list. No designer change
+is needed for any of this.
+
 The `GroupName = flav` setting makes those five option buttons mutually
 exclusive. Make sure every one of them has that string in `GroupName`.
 

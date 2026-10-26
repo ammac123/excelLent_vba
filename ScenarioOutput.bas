@@ -40,8 +40,10 @@ Option Explicit
 '                           source            table name (required)
 '                           x                 x-axis column (required)
 '                           series            comma-separated series columns (required)
-'                           baselineSource    optional parallel table
-'                           baselineSeries    comma-separated series from baselineSource
+'                           baselineSource    optional parallel table (only read when
+'                                             binding to live tables; stored charts
+'                                             take the baseline from the current state)
+'                           baselineSeries    comma-separated baseline series columns
 '                           title             chart title (default = spec label or
 '                                             "<source>")
 '                           format            value-axis number format, e.g. 0.0%
@@ -54,8 +56,12 @@ Option Explicit
 ' Chart size: height/width when the spec sets them, otherwise the token cell's merged
 ' area, otherwise 15 rows by 8 columns. On this sheet the chart is drawn at that size
 ' even when it runs past the template's edge. The comparison sheet renders the same
-' tokens but shrinks each chart to fit inside its scenario block, and plots stored
-' results instead of the live tables (see ScenarioCompare).
+' tokens but shrinks each chart to fit inside its scenario block (see ScenarioCompare).
+'
+' Charts plot the picked scenario's stored results, not the live tables, which only
+' ever hold the loaded scenario; so a chart always agrees with the tokens around it.
+' Baseline series read the current state's stored results. A series only has data for
+' metrics that are ticked Include and have been run; uncaptured cells plot as gaps.
 '
 ' A cell holding a chart token is cleared before the chart is anchored, so the text
 ' never shows through. Any ChartObject this module creates is named "scnOut_<spec>_<n>"
@@ -78,14 +84,17 @@ Option Explicit
 '   5. Walks the block for chart tokens and creates ChartObjects.
 '   6. Records the new extent.
 '
-' So the output can never drift out of step with tblScenarioResults or the live
-' tblMetricsOut* tables that charts bind to.
+' So the output can never drift out of step with tblScenarioResults.
 
 Private Const EXTENT_KEY As String = "OutputExtent"
 Private Const CHART_NAME_PREFIX As String = "scnOut_"
 Private Const CHART_TOKEN_PREFIX As String = "Chart:"
 Private Const LOADED_SENTINEL As String = "Loaded"
-Private Const STAGING_SHEET As String = "ChartStaging"
+
+' Each sheet stages its chart data separately, so rebuilding one never blanks the
+' other's charts.
+Public Const OUTPUT_STAGING_SHEET As String = "80_STG_Chart_Output"
+Public Const COMPARE_STAGING_SHEET As String = "81_STG_Chart_Compare"
 
 '=======================================================================================
 ' Entry point
@@ -122,6 +131,9 @@ Public Sub BuildScenarioOutput()
 
     guard = BeginBatch("Building the scenario output...")
 
+    ' Wildcard rows repeated once per segment; from here on the template is that taller copy.
+    Set template = ExpandTemplateRows(template)
+
     ClearPreviousOutput ws
 
     Set dest = anchor.Cells(1, 1).Resize(template.Rows.count, template.Columns.count)
@@ -131,10 +143,12 @@ Public Sub BuildScenarioOutput()
     template.Copy dest.Cells(1, 1)
     CopyColumnWidthsAndRowHeights template, dest
     Application.CutCopyMode = False
+    ClearExpandedTemplate
 
     FillTokens dest, scenarioId, 1, results, labels, formats
 
-    chartProblems = RenderChartTokens(ws, dest, CHART_NAME_PREFIX, False)
+    chartProblems = RenderChartTokens(ws, dest, CHART_NAME_PREFIX, False, scenarioId, _
+                                      results, OUTPUT_STAGING_SHEET)
 
     ' Template formulas are written while calculation is manual; settle them here so the
     ' sheet never shows stale results between the write and the next recalc.
@@ -441,13 +455,17 @@ End Function
 '   fitToBlock         shrink each chart so it stays inside block
 '   storedScenarioId   plot that scenario's stored results (with the current state as
 '                      the baseline) instead of binding to the live tables; needs results
+'                      and stagingSheet
+'   stagingSheet       hidden sheet the stored values are written to for the series to
+'                      bind to; one per calling sheet, cleared by ClearStagedChartData
 '
 ' A chart that fails is skipped rather than aborting the caller's build. Returns one
 ' line per skipped chart, or "" when every chart was placed.
 Public Function RenderChartTokens(ws As Worksheet, block As Range, chartPrefix As String, _
                                   ByVal fitToBlock As Boolean, _
                                   Optional storedScenarioId As String = "", _
-                                  Optional results As Object = Nothing) As String
+                                  Optional results As Object = Nothing, _
+                                  Optional stagingSheet As String = "") As String
     Dim cell As Range
     Dim text As String
     Dim body As String
@@ -470,7 +488,7 @@ Public Function RenderChartTokens(ws As Worksheet, block As Range, chartPrefix A
         body = Mid$(Mid$(text, 2, Len(text) - 2), Len(CHART_TOKEN_PREFIX) + 1)
         spec = ResolveChartSpec(body)
         PlaceChart ws, cell, block, spec, chartPrefix & SafeName(spec.label) & "_" & serial, _
-                   fitToBlock, storedScenarioId, results
+                   fitToBlock, storedScenarioId, results, stagingSheet
 
         On Error GoTo 0
 NextCell:
@@ -582,7 +600,8 @@ End Function
 ' a skipped chart never leaves an empty frame behind.
 Private Sub PlaceChart(ws As Worksheet, anchorCell As Range, block As Range, _
                        spec As ChartSpec, chartName As String, ByVal fitToBlock As Boolean, _
-                       storedScenarioId As String, results As Object)
+                       storedScenarioId As String, results As Object, _
+                       stagingSheet As String)
     Dim source As ListObject, baseline As ListObject
     Dim chartObj As ChartObject
     Dim chart As chart
@@ -619,7 +638,7 @@ Private Sub PlaceChart(ws As Worksheet, anchorCell As Range, block As Range, _
         hasBaseline = hasBaseline And Not baseline Is Nothing
     Else
         Set staged = StageStoredSeries(spec, storedScenarioId, results, seriesList, _
-                                       baseList, hasBaseline)
+                                       baseList, hasBaseline, stagingSheet)
     End If
 
     ChartFrame anchorCell, block, spec, fitToBlock, leftPx, topPx, widthPx, heightPx
@@ -733,8 +752,8 @@ End Sub
 ' Stored-result chart data
 '=======================================================================================
 '
-' The live tables a chart normally binds to only ever hold the loaded scenario, so a
-' chart drawn for any other scenario has to be fed from tblScenarioResults instead. The
+' The live tables only ever hold the loaded scenario, so a chart drawn for a picked
+' scenario has to be fed from tblScenarioResults instead. The
 ' metric catalogue says which stored metric holds each (row, column) cell of a source
 ' table, so a chart's x/series columns map straight onto metric IDs. The values are
 ' written to a very hidden sheet, one block of columns per chart, and the series bind to
@@ -747,7 +766,8 @@ End Sub
 
 Private Function StageStoredSeries(spec As ChartSpec, scenarioId As String, _
                                    results As Object, seriesList() As String, _
-                                   baseList() As String, ByVal hasBaseline As Boolean) As Range
+                                   baseList() As String, ByVal hasBaseline As Boolean, _
+                                   stagingSheet As String) As Range
     Dim specs() As MetricSpec
     Dim rowKeys As Object, cellIds As Object
     Dim keys As Variant
@@ -761,6 +781,10 @@ Private Function StageStoredSeries(spec As ChartSpec, scenarioId As String, _
     If results Is Nothing Then
         Err.Raise vbObjectError + 756, "ScenarioOutput", _
                   "Chart '" & spec.label & "' needs stored results but none were passed in."
+    End If
+    If Len(stagingSheet) = 0 Then
+        Err.Raise vbObjectError + 757, "ScenarioOutput", _
+                  "Chart '" & spec.label & "' needs a staging sheet but none was passed in."
     End If
 
     ' Row keys in catalogue order, which follows the source table's own row order.
@@ -821,7 +845,7 @@ Private Function StageStoredSeries(spec As ChartSpec, scenarioId As String, _
         Next i
     Next r
 
-    Set stage = ChartStagingSheet()
+    Set stage = ChartStagingSheet(stagingSheet)
     If IsEmpty(stage.Cells(1, 1).value) Then
         col = 1
     Else
@@ -856,25 +880,25 @@ End Function
 
 ' Created on first use and kept very hidden, so it never shows in the sheet tabs or the
 ' Unhide dialog.
-Private Function ChartStagingSheet() As Worksheet
+Private Function ChartStagingSheet(sheetName As String) As Worksheet
     Dim stage As Worksheet
 
-    Set stage = SheetOrNothing(STAGING_SHEET)
+    Set stage = SheetOrNothing(sheetName)
     If stage Is Nothing Then
         Set stage = ThisWorkbook.Worksheets.Add( _
             After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.count))
-        stage.Name = STAGING_SHEET
+        stage.Name = sheetName
         stage.Visible = xlSheetVeryHidden
     End If
 
     Set ChartStagingSheet = stage
 End Function
 
-' Empties the staging sheet. Call only after deleting the charts that read from it.
-Public Sub ClearStagedChartData()
+' Empties one staging sheet. Call only after deleting the charts that read from it.
+Public Sub ClearStagedChartData(sheetName As String)
     Dim stage As Worksheet
 
-    Set stage = SheetOrNothing(STAGING_SHEET)
+    Set stage = SheetOrNothing(sheetName)
     If Not stage Is Nothing Then stage.Cells.Clear
 End Sub
 
@@ -929,8 +953,9 @@ Private Sub ClearPreviousOutput(ws As Worksheet)
     Dim target As Range
     Dim extent As String
 
-    ' Delete charts first so the subsequent Clear is not fighting their anchor cells.
+    ' Charts before the data they plot, and both before the cells they sit over.
     DeleteRenderedCharts ws, CHART_NAME_PREFIX
+    ClearStagedChartData OUTPUT_STAGING_SHEET
 
     extent = SettingText(EXTENT_KEY)
     If Len(extent) = 0 Then Exit Sub
