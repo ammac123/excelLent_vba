@@ -178,6 +178,14 @@ Private Const WILDCARD As String = "*"
 Private Const MISSING_VALUE As String = "n/a"
 Private Const STAGING_SHEET As String = "82_STG_Templates"
 
+' A scenario and the current state that should agree can still differ by a few units in
+' the last place of a Double (e.g. 3E-15) because the two runs sum in a different order.
+' Differences inside this band are reported as exactly zero. The relative term scales
+' with the metric so a balance in the billions and a rate of 0.05 are treated alike; the
+' absolute term covers metrics that are themselves zero or nearly so.
+Private Const DELTA_REL_TOL As Double = 0.0000000001     ' 1E-10 of the larger value
+Private Const DELTA_ABS_TOL As Double = 0.000000000001   ' 1E-12
+
 ' The segment map, read once and reused for every Segment token until ForgetSegmentMap.
 ' FillTokens forgets it at the start of each block, so a build always sees the live table
 ' but never reads it more than once per block.
@@ -457,6 +465,9 @@ Public Function DeltaValue(results As Object, scenarioId As String, metricId As 
     s = CDbl(scenVal)
     c = CDbl(currVal)
 
+    ' Snap floating-point residue to zero so an unchanged metric shows as 0, not 1E-15.
+    If NearlyEqual(s, c) Then s = c
+
     If asPct Then
         If c = 0 Then
             DeltaValue = missing
@@ -466,6 +477,15 @@ Public Function DeltaValue(results As Object, scenarioId As String, metricId As 
     Else
         DeltaValue = s - c
     End If
+End Function
+
+' True when a and b differ only by floating-point noise (see DELTA_REL_TOL).
+Private Function NearlyEqual(ByVal a As Double, ByVal b As Double) As Boolean
+    Dim scale As Double
+
+    scale = Abs(a)
+    If Abs(b) > scale Then scale = Abs(b)
+    NearlyEqual = (Abs(a - b) <= DELTA_ABS_TOL + DELTA_REL_TOL * scale)
 End Function
 
 Public Function ScenarioField(field As String, scenarioId As String, _

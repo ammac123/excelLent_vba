@@ -9,7 +9,7 @@ Option Explicit
 
 Private Const MANAGER_SHEET As String = "04_SCN_Manager"
 Private Const NAME_PICKER As String = "scenarioPicker"
-Private Const LOOKUP_SHEET As String = "99_Lookup"
+Private Const LOOKUP_SHEET As String = "99_Lookups"
 Private Const NAME_PICKER_ANCHOR As String = "scenarioPickerListAnchor"
 Private Const NAME_PICKER_LIST As String = "scenarioPickerList"
 Private Const NAME_STATUS As String = "scenarioStatus"
