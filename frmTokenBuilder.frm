@@ -53,6 +53,7 @@ Private Sub UserForm_Initialize()
     ' display scaling (e.g. 125%) and won't keep typed values.
     Me.Width = 540
     Me.Height = 620
+    CentreFormOnExcel Me
     seriesListBox = CaptureBox(lstInlineSeries)
     baseSeriesListBox = CaptureBox(lstInlineBaseSeries)
     ForgetStoredMetrics

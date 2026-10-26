@@ -5,7 +5,7 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} frmScenarioEditor
    ClientLeft      =   72
    ClientTop       =   240
    ClientWidth     =   5640
-   StartUpPosition =   1  'CenterOwner
+   StartUpPosition =   0  'Manual
 End
 Attribute VB_Name = "frmScenarioEditor"
 Attribute VB_GlobalNameSpace = False
@@ -203,6 +203,7 @@ Private Sub ArrangeControls()
     y = y + BUTTON_HEIGHT + MARGIN
 
     Me.Height = y + (Me.Height - Me.InsideHeight)
+    CentreFormOnExcel Me
 End Sub
 
 ' Labels sit a little lower than their field so the text lines up with the field's.

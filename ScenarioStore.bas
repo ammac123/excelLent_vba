@@ -105,6 +105,10 @@ Private Const NAME_ACTIVE_ID As String = "activeScenarioId"
 Private Const NAME_ACTIVE_NAME As String = "activeScenarioName"
 Private Const NAME_ACTIVE_DIRTY As String = "activeScenarioDirty"
  
+' Excel's limit on a comma-separated dropdown list, as the output picker uses. See
+' ScenarioNameProblem.
+Public Const MAX_NAME_LENGTH As Long = 255
+
 ' No hyphen: IDs double as AppState keys, which become defined names.
 Private Const ID_PREFIX As String = "SCN"
 Private Const ID_DIGITS As Long = 4
@@ -353,17 +357,33 @@ End Function
 ' What is wrong with these details, or "" when they can be saved. A details block with
 ' no scenarioId is checked as a new scenario.
 Public Function ScenarioDetailsProblem(details As ScenarioDetails) As String
-    Dim displayName As String
-
-    displayName = Trim$(details.displayName)
-    If Len(displayName) = 0 Then
-        ScenarioDetailsProblem = "Enter a name for the scenario."
-    ElseIf StrComp(displayName, CurrentStateScenarioName(), vbTextCompare) = 0 Then
-        ScenarioDetailsProblem = "'" & displayName & "' is reserved for the current-state row."
-    ElseIf Not NameIsAvailable(displayName, details.scenarioId) Then
-        ScenarioDetailsProblem = "A scenario named '" & displayName & "' already exists."
-    ElseIf Not IsDate(details.effectiveDate) Then
+    ScenarioDetailsProblem = ScenarioNameProblem(details.displayName, details.scenarioId)
+    If Len(ScenarioDetailsProblem) = 0 And Not IsDate(details.effectiveDate) Then
         ScenarioDetailsProblem = "The effective date is blank or is not a date."
+    End If
+End Function
+
+' What is wrong with a scenario name, or "" when it can be used. ignoreId is the
+' scenario being renamed, so keeping its own name isn't a clash.
+'
+' The output sheet's scenario picker is an in-cell dropdown built as one comma-separated
+' list, so a comma would split a name in two, and Excel caps that list at 255 characters.
+' (The manager's picker reads a helper range instead and has neither limit.)
+Public Function ScenarioNameProblem(displayName As String, Optional ignoreId As String = "") As String
+    Dim trimmed As String
+
+    trimmed = Trim$(displayName)
+    If Len(trimmed) = 0 Then
+        ScenarioNameProblem = "Enter a name for the scenario."
+    ElseIf InStr(trimmed, ",") > 0 Then
+        ScenarioNameProblem = "Scenario names can't contain a comma."
+    ElseIf Len(trimmed) > MAX_NAME_LENGTH Then
+        ScenarioNameProblem = "Scenario names can be at most " & MAX_NAME_LENGTH & _
+                              " characters long; this one is " & Len(trimmed) & "."
+    ElseIf StrComp(trimmed, CurrentStateScenarioName(), vbTextCompare) = 0 Then
+        ScenarioNameProblem = "'" & trimmed & "' is reserved for the current-state row."
+    ElseIf Not NameIsAvailable(trimmed, ignoreId) Then
+        ScenarioNameProblem = "A scenario named '" & trimmed & "' already exists."
     End If
 End Function
 
@@ -510,16 +530,10 @@ Public Function NewScenario(displayName As String, Optional description As Strin
     Dim scalars() As ScenarioScalar
     Dim i As Long
     Dim guard As CalcGuard
- 
-    If StrComp(Trim$(displayName), CurrentStateScenarioName(), vbTextCompare) = 0 Then
-        Err.Raise vbObjectError + 621, "ScenarioStore", _
-                  "'" & displayName & "' is reserved for the current-state row."
-    End If
+    Dim problem As String
 
-    If Not NameIsAvailable(displayName) Then
-        Err.Raise vbObjectError + 610, "ScenarioStore", _
-                  "A scenario named '" & displayName & "' already exists."
-    End If
+    problem = ScenarioNameProblem(displayName)
+    If Len(problem) > 0 Then Err.Raise vbObjectError + 610, "ScenarioStore", problem
 
     scenarioId = NextScenarioId()
     Set lo = RequireTable(TBL_SCENARIOS)
@@ -611,11 +625,10 @@ Public Function SaveActiveScenarioAs(displayName As String, _
     Dim newRow As ListRow
     Dim scenarioId As String
     Dim relock As Worksheet
+    Dim problem As String
 
-    If Not NameIsAvailable(displayName) Then
-        Err.Raise vbObjectError + 612, "ScenarioStore", _
-                  "A scenario named '" & displayName & "' already exists."
-    End If
+    problem = ScenarioNameProblem(displayName)
+    If Len(problem) > 0 Then Err.Raise vbObjectError + 612, "ScenarioStore", problem
 
     scenarioId = NextScenarioId()
     Set lo = RequireTable(TBL_SCENARIOS)

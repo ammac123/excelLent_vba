@@ -5,10 +5,13 @@ Option Explicit
 ' messages; the actual work lives in ScenarioStore.
 '
 ' Assign one macro per button. The picker is the cell named scenarioPicker, validated
-' against the Name column of tblScenarios.
+' against scenarioPickerList on 99_Lookup: every scenario except the current state.
 
 Private Const MANAGER_SHEET As String = "04_SCN_Manager"
 Private Const NAME_PICKER As String = "scenarioPicker"
+Private Const LOOKUP_SHEET As String = "99_Lookup"
+Private Const NAME_PICKER_ANCHOR As String = "scenarioPickerListAnchor"
+Private Const NAME_PICKER_LIST As String = "scenarioPickerList"
 Private Const NAME_STATUS As String = "scenarioStatus"
 Private Const NAME_ACTIVE_NAME As String = "activeScenarioName"
 
@@ -226,8 +229,9 @@ Public Sub SaveScenarioAsButton()
                                  ActiveScenarioNameVal() & " (copy)"))
     If Len(displayName) = 0 Then Exit Sub
 
-    If Not NameIsAvailable(displayName) Then
-        MsgBox "A scenario named '" & displayName & "' already exists.", vbExclamation
+    problem = ScenarioNameProblem(displayName)
+    If Len(problem) > 0 Then
+        MsgBox problem, vbExclamation
         Exit Sub
     End If
 
@@ -528,8 +532,122 @@ Public Sub RefreshScenarioManager()
     Set cell = NamedRangeOrNothing(NAME_STATUS)
     If Not cell Is Nothing Then cell.value = StatusText(scenarioId)
 
+    RefreshScenarioPicker
     RefreshOutputScenarioPicker
 End Sub
+
+' Points the picker's dropdown at the helper list on the lookup sheet: a live FILTER
+' over tblScenarios that leaves out the current state, which can't be loaded, saved,
+' renamed or deleted. The list keeps itself up to date, so this only does work the
+' first time, or when the helper or the picker's validation has gone missing.
+Private Sub RefreshScenarioPicker()
+    Dim cell As Range
+    Dim source As String
+    Dim relock As Worksheet
+    Dim promptTitle As String, promptText As String
+    Dim current As String
+
+    Set cell = NamedRangeOrNothing(NAME_PICKER)
+    If cell Is Nothing Then Exit Sub
+
+    EnsureScenarioPickerList
+    source = "=" & NAME_PICKER_LIST
+
+    ' Reading the validation raises when the cell has none yet.
+    On Error Resume Next
+    current = cell.Validation.Formula1
+    promptTitle = cell.Validation.InputTitle
+    promptText = cell.Validation.InputMessage
+    On Error GoTo 0
+    If StrComp(current, source, vbTextCompare) = 0 Then Exit Sub
+
+    ' Validation can't be changed on a protected sheet, and the picker shares the
+    ' manager sheet with tblScenarios.
+    Set relock = UnlockScenarioSheetIfLocked()
+    On Error GoTo Failed
+
+    With cell.Validation
+        .Delete
+        .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Formula1:=source
+        .IgnoreBlank = True
+        .InCellDropdown = True
+        ' Keep whatever prompt the cell showed when selected.
+        .InputTitle = promptTitle
+        .InputMessage = promptText
+    End With
+
+    RelockScenarioSheet relock
+    Exit Sub
+
+Failed:
+    RelockScenarioSheet relock
+    Err.Raise Err.Number, "ScenarioUI.RefreshScenarioPicker", Err.description
+End Sub
+
+' Makes sure the helper list exists: the FILTER formula in the cell named
+' scenarioPickerListAnchor, and scenarioPickerList over its spill range. The first time,
+' the anchor goes under a header past the last used column of the lookup sheet; cut and
+' paste it anywhere afterwards and the names follow it.
+Private Sub EnsureScenarioPickerList()
+    Dim anchor As Range
+    Dim ws As Worksheet
+    Dim col As Long
+    Dim wanted As String
+    Dim listRef As String
+    Dim q As String
+
+    Set anchor = NamedRangeOrNothing(NAME_PICKER_ANCHOR)
+    If anchor Is Nothing Then
+        Set ws = SheetOrNothing(LOOKUP_SHEET)
+        If ws Is Nothing Then
+            Err.Raise vbObjectError + 640, "ScenarioUI", _
+                      "The sheet '" & LOOKUP_SHEET & "' is missing, so the scenario picker " & _
+                      "has nowhere to keep its list."
+        End If
+
+        col = NextFreeColumn(ws)
+        ws.Cells(1, col).value = "Scenario picker list"
+        ws.Cells(1, col).Font.Bold = True
+        Set anchor = ws.Cells(2, col)
+        ThisWorkbook.names.Add Name:=NAME_PICKER_ANCHOR, _
+                               RefersTo:="=" & anchor.Address(True, True, xlA1, True)
+    End If
+
+    ' =FILTER(tblScenarios[Name],tblScenarios[ScenarioID]<>"CURRENT","")
+    ' Formula2 so it spills; plain Formula would add an implicit @ and return one name.
+    q = Chr$(34)
+    wanted = "=FILTER(" & TBL_SCENARIOS & "[" & COL_NAME & "]," & _
+             TBL_SCENARIOS & "[" & COL_SCENARIO_ID & "]<>" & q & CurrentStateScenarioId() & q & _
+             "," & q & q & ")"
+    If StrComp(anchor.Formula2, wanted, vbTextCompare) <> 0 Then anchor.Formula2 = wanted
+
+    ' Defined on the anchor's name rather than its address so it follows the cell if it
+    ' is moved. The # takes in however many rows the FILTER spills.
+    listRef = "=" & NAME_PICKER_ANCHOR & "#"
+    If Not NameRefersTo(NAME_PICKER_LIST, listRef) Then
+        ThisWorkbook.names.Add Name:=NAME_PICKER_LIST, RefersTo:=listRef
+    End If
+End Sub
+
+' One column past the last one in use, leaving a blank column between, so the spill has
+' its column to itself.
+Private Function NextFreeColumn(ws As Worksheet) As Long
+    Dim lastCell As Range
+
+    Set lastCell = ws.Cells.Find(What:="*", LookIn:=xlFormulas, SearchOrder:=xlByColumns, _
+                                 SearchDirection:=xlPrevious)
+    If lastCell Is Nothing Then
+        NextFreeColumn = 1
+    Else
+        NextFreeColumn = lastCell.Column + 2
+    End If
+End Function
+
+Private Function NameRefersTo(nameRef As String, refersTo As String) As Boolean
+    On Error Resume Next
+    NameRefersTo = (StrComp(ThisWorkbook.names(nameRef).refersTo, refersTo, vbTextCompare) = 0)
+    On Error GoTo 0
+End Function
 
 Private Function StatusText(scenarioId As String) As String
     If Len(scenarioId) = 0 Then
@@ -632,6 +750,22 @@ Private Function SameDate(a As Variant, b As Variant) As Boolean
         SameDate = (CStr(a) = CStr(b))
     End If
 End Function
+
+' Centres a form on the Excel window, wherever that is. StartUpPosition CenterOwner
+' often centres on the primary monitor instead when Excel is on another screen. Call
+' it once the form's size is final and before it is shown.
+Public Sub CentreFormOnExcel(frm As Object)
+    Dim spareWidth As Double, spareHeight As Double
+
+    spareWidth = Application.Width - frm.Width
+    spareHeight = Application.Height - frm.Height
+    If spareWidth < 0 Then spareWidth = 0
+    If spareHeight < 0 Then spareHeight = 0
+
+    frm.StartUpPosition = 0   ' Manual
+    frm.Left = Application.Left + spareWidth / 2
+    frm.Top = Application.Top + spareHeight / 2
+End Sub
 
 Private Sub ReportFailure(action As String)
     MsgBox "Could not " & action & "." & vbNewLine & vbNewLine & Err.description, vbCritical
