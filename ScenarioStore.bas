@@ -63,6 +63,8 @@ Public Type ChartSpec
     showLegend As Boolean    ' default True
     heightRows As Long       ' chart height in rows at the anchor cell; 0 lets it default
     widthCols As Long        ' chart width in columns; 0 lets it default
+    styleChart As String     ' optional ChartObject on the chart style sheet whose formatting
+                             ' is copied onto the chart; "" to leave Excel's default look
 End Type
  
 ' Captured application state for the duration of a scenario swap.

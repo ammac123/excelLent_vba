@@ -505,7 +505,8 @@ Private Function MakeChartSpec(label As String, kind As String, sourceTable As S
                                Optional numberFormat As String = "", _
                                Optional showLegend As Boolean = True, _
                                Optional heightRows As Long = 0, _
-                               Optional widthCols As Long = 0) As ChartSpec
+                               Optional widthCols As Long = 0, _
+                               Optional styleChart As String = "") As ChartSpec
     With MakeChartSpec
         .label = label
         .kind = kind
@@ -519,6 +520,7 @@ Private Function MakeChartSpec(label As String, kind As String, sourceTable As S
         .showLegend = showLegend
         .heightRows = heightRows
         .widthCols = widthCols
+        .styleChart = styleChart
     End With
 End Function
 

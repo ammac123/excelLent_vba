@@ -50,6 +50,8 @@ Option Explicit
 '                           legend            Y/N (default Y)
 '                           height            chart height in rows at the anchor cell
 '                           width             chart width in columns at the anchor cell
+'                           style             name of a ChartObject on the chart style
+'                                             sheet whose formatting is copied on
 '                         Semicolons separate pairs, equals separates key and value, and
 '                         commas separate items within a list. Keys are case-insensitive.
 '
@@ -67,6 +69,13 @@ Option Explicit
 ' never shows through. Any ChartObject this module creates is named "scnOut_<spec>_<n>"
 ' so a subsequent build can find and delete it cleanly. A chart that cannot be built is
 ' skipped and listed in the closing message; the rest of the output still renders.
+'
+' Chart style: a spec with a style draws its chart as usual, then copies on the
+' formatting (colours, fonts, gridlines, axes, chart type) of a hand-formatted chart of
+' that name on CHART_STYLE_SHEET. Series formats map by position, so give the style chart
+' at least as many series as the charts that use it, in the same order. The spec's
+' title, legend and number format are applied after the style, so they still win. Keep
+' style charts on that sheet, not over a template range, or they get copied with it.
 '
 ' Merged cells are safe to use for chart areas, including one that runs past the
 ' template's defined range: the template is widened to take in every merged area it
@@ -95,6 +104,9 @@ Private Const LOADED_SENTINEL As String = "Loaded"
 ' other's charts.
 Public Const OUTPUT_STAGING_SHEET As String = "80_STG_Chart_Output"
 Public Const COMPARE_STAGING_SHEET As String = "81_STG_Chart_Compare"
+
+' Hand-formatted charts that spec styles copy their look from.
+Public Const CHART_STYLE_SHEET As String = "83_STG_Chart_Styles"
 
 '=======================================================================================
 ' Entry point
@@ -579,6 +591,7 @@ Public Function ParseInlineChartSpec(body As String) As ChartSpec
             Case "height":          ParseInlineChartSpec.heightRows = CLng(Val(value))
             Case "width":           ParseInlineChartSpec.widthCols = CLng(Val(value))
             Case "label":           ParseInlineChartSpec.label = value
+            Case "style":           ParseInlineChartSpec.styleChart = value
         End Select
 
 NextPart:
@@ -675,6 +688,10 @@ Private Sub PlaceChart(ws As Worksheet, anchorCell As Range, block As Range, _
         Next i
     End If
 
+    ' After the series exist so their formats carry over; before the spec's own
+    ' settings so those override the style.
+    If Len(spec.styleChart) > 0 Then ApplyChartStyle chart, spec.styleChart
+
     chart.HasTitle = True
     chart.ChartTitle.text = IIf(Len(spec.title) > 0, spec.title, spec.label)
     chart.HasLegend = spec.showLegend
@@ -691,6 +708,24 @@ Failed:
     errText = Err.description
     If Not chartObj Is Nothing Then chartObj.Delete
     Err.Raise errNumber, "ScenarioOutput", errText
+End Sub
+
+' Copies the formatting of the style chart named styleName on CHART_STYLE_SHEET onto
+' chart. Series formats map by position.
+Private Sub ApplyChartStyle(chart As chart, styleName As String)
+    Dim styleObj As ChartObject
+
+    On Error Resume Next
+    Set styleObj = ThisWorkbook.Worksheets(CHART_STYLE_SHEET).ChartObjects(styleName)
+    On Error GoTo 0
+    If styleObj Is Nothing Then
+        Err.Raise vbObjectError + 754, "ScenarioOutput", _
+                  "No style chart named '" & styleName & "' on sheet " & CHART_STYLE_SHEET & "."
+    End If
+
+    styleObj.chart.ChartArea.Copy
+    chart.Paste Type:=xlFormats
+    Application.CutCopyMode = False
 End Sub
 
 ' Where the chart goes and how big it is. The intended size is the spec's height/width

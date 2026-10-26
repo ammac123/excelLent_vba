@@ -205,6 +205,7 @@ Public Function ComposeChartInlineToken(spec As ChartSpec) As String
     If Not spec.showLegend Then parts = parts & ";legend=N"
     If spec.heightRows > 0 Then parts = parts & ";height=" & spec.heightRows
     If spec.widthCols > 0 Then parts = parts & ";width=" & spec.widthCols
+    If Len(Trim$(spec.styleChart)) > 0 Then parts = parts & ";style=" & Trim$(spec.styleChart)
 
     ComposeChartInlineToken = TokenOpen() & "Chart:" & parts & TokenClose()
 End Function
