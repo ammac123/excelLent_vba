@@ -627,7 +627,6 @@ End Sub
 ' values and most formatting, ClearFormats then catches banding and fills a dismissed
 ' table style can otherwise leave on cells beyond the new, narrower rectangle.
 Private Sub ClearPreviousOutput(ws As Worksheet)
-    Dim lo As ListObject
     Dim extent As String
     Dim target As Range
 
@@ -635,10 +634,7 @@ Private Sub ClearPreviousOutput(ws As Worksheet)
     DeleteRenderedCharts ws, CHART_NAME_PREFIX
     ClearStagedChartData COMPARE_STAGING_SHEET
 
-    ' Unlist first so the comparison table's style is no longer "owned" by a live
-    ' ListObject; once detached, Clear/ClearFormats can actually reset the cells.
-    Set lo = TableOrNothing(ComparisonTableName())
-    If Not lo Is Nothing Then lo.Unlist
+    DeleteComparisonTable
 
     extent = SettingText(EXTENT_KEY)
     If Len(extent) = 0 Then Exit Sub
@@ -656,6 +652,25 @@ Private Sub ClearPreviousOutput(ws As Worksheet)
     target.ClearFormats
 
     SettingText(EXTENT_KEY) = ""
+End Sub
+
+' Deletes the comparison table, then clears the cells it covered plus the row below.
+' Excel can auto-extend a table by a row, so that row may hold leftover values or table
+' formatting. The area is taken before the delete, since the ListObject's range is gone
+' after it.
+Private Sub DeleteComparisonTable()
+    Dim lo As ListObject
+    Dim area As Range
+
+    Set lo = TableOrNothing(ComparisonTableName())
+    If lo Is Nothing Then Exit Sub
+
+    Set area = lo.Range.Resize(lo.Range.Rows.count + 1)
+    lo.Delete
+
+    Set area = WholeMergeFootprint(area)
+    area.Clear
+    area.ClearFormats
 End Sub
 
 ' The whole generated area as one rectangle. A rectangle rather than a union of blocks:

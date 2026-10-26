@@ -41,8 +41,20 @@ Option Explicit
 '   ScenarioFieldChoices()          built-in field names + custom columns on
 '                                   tblScenarios, with bookkeeping columns hidden
 '   NamedChartChoices()             entries from ScenarioOutputCharts()
-'   SourceTableChoices()            every ListObject in the workbook
-'   TableColumnChoices(tableName)   that table's column names
+'   ChartSourceChoices()            tables the catalogue holds metrics from
+'   ChartRowKeyColumn(source)       that table's row-key column, the usual x axis
+'   ChartXChoices(source)           the row-key column, then the catalogued columns
+'   ChartSeriesChoices(source)      the catalogued columns, in catalogue order
+'   ChartColumnStatuses(source)     each of those columns' include status
+'
+' Include status: what a pick needs ticked and run before it has stored data.
+'
+'   MetricIncludeStatus(metricId)            "ready", "not included", ...
+'   ChartIncludeStatus(source, columns)
+'   StatusNeedsInclude(status)               True while something is unticked
+'   IncludeMetricPick(metricId)              ticks Include for the pick; returns
+'   IncludeChartPick(source, columns)        how many rows changed
+'   ForgetStoredMetrics()                    drop the cached tblScenarioResults read
 '   SegmentIdChoices()              "(all segments)", then the segment IDs in the
 '                                   segment map, in table order
 '   SegmentColumnChoices()          the segment map's attribute columns
@@ -65,6 +77,9 @@ Public Const KIND_UNKNOWN As String = "Unknown"
 Public Const METRIC_SOURCE_NAMED As String = "(named ranges)"
 Public Const METRIC_SEGMENT_NONE As String = "(no segment)"
 Public Const METRIC_SEGMENT_ALL As String = "(all segments)"
+
+' Metric IDs with at least one stored result; see "Include status" below.
+Private storedMetrics As Object
 
 Public Type ParsedToken
     kind As String          ' one of the KIND_* constants
@@ -163,7 +178,8 @@ End Function
 
 ' Only the required three (source/x/series) are mandatory; the rest fold in only when
 ' set. Grammar matches ScenarioOutput.ParseInlineChartSpec so a composed token
-' round-trips cleanly.
+' round-trips cleanly. The form never sets baselineTable: charts plot stored results,
+' whose baseline is the current state's values for the same source.
 Public Function ComposeChartInlineToken(spec As ChartSpec) As String
     Dim parts As String
     Dim kind As String
@@ -297,6 +313,10 @@ Public Function ValidateSavedToken(token As String) As String
                 ValidateSavedToken = "Metric '" & parsed.metricId & _
                                      "' is no longer in the catalogue."
             End If
+            ' {Label.X} reads the catalogue, not a stored result.
+            If Len(ValidateSavedToken) = 0 And parsed.kind <> KIND_LABEL Then
+                ValidateSavedToken = IncludeAdvice(MetricPickIds(parsed.metricId))
+            End If
 
         Case KIND_SCENARIO
             Select Case UCase$(parsed.column)
@@ -349,7 +369,8 @@ Private Function ValidateWildcardMetric(pattern As String) As String
 
     If matched Then
         ValidateWildcardMetric = "Every metric matching '" & pattern & "' is unticked in " & _
-                                 MetricCatalogueTableName() & ", so its row renders empty."
+                                 MetricCatalogueTableName() & ", so its row renders empty. " & _
+                                 "Press Include, then run the scenarios."
     Else
         ValidateWildcardMetric = "No metric in the catalogue matches '" & pattern & "'."
     End If
@@ -393,9 +414,6 @@ End Function
 
 Private Function ValidateInlineChart(spec As ChartSpec) As String
     Dim lo As ListObject
-    Dim parts() As String
-    Dim i As Long
-    Dim col As String
 
     Set lo = TableOrNothing(spec.sourceTable)
     If lo Is Nothing Then
@@ -408,32 +426,42 @@ Private Function ValidateInlineChart(spec As ChartSpec) As String
         Exit Function
     End If
 
-    parts = Split(spec.seriesColumns, ",")
-    For i = LBound(parts) To UBound(parts)
-        col = Trim$(parts(i))
-        If Len(col) > 0 And ColumnIndexOrZero(lo, col) = 0 Then
-            ValidateInlineChart = "Series column '" & col & "' is missing on " & _
-                                  spec.sourceTable & "."
-            Exit Function
-        End If
-    Next
-
-    If Len(spec.baselineTable) = 0 Then Exit Function
-
-    Set lo = TableOrNothing(spec.baselineTable)
-    If lo Is Nothing Then
-        ValidateInlineChart = "Baseline table '" & spec.baselineTable & "' is missing."
+    ' Charts plot stored results, so a source the catalogue never scans has nothing to
+    ' draw however its columns are picked.
+    If ChartMetricIds(spec.sourceTable, "*").count = 0 Then
+        ValidateInlineChart = "No metric in " & MetricCatalogueTableName() & " comes from " & _
+                              spec.sourceTable & ", so the chart has nothing stored to " & _
+                              "plot. Add it to MetricSourceTables() and sync the metrics."
         Exit Function
     End If
 
-    If Len(spec.baselineColumns) = 0 Then Exit Function
+    ValidateInlineChart = ValidateChartColumns(lo, spec.seriesColumns, "Series")
+    If Len(ValidateInlineChart) > 0 Then Exit Function
+    ValidateInlineChart = ValidateChartColumns(lo, spec.baselineColumns, "Vs-current series")
+    If Len(ValidateInlineChart) > 0 Then Exit Function
 
-    parts = Split(spec.baselineColumns, ",")
+    ValidateInlineChart = IncludeAdvice(ChartMetricIds(spec.sourceTable, _
+                                        spec.seriesColumns & "," & spec.baselineColumns))
+End Function
+
+' Each column in csv must be on the table and have catalogued metrics behind it.
+Private Function ValidateChartColumns(lo As ListObject, csv As String, _
+                                      role As String) As String
+    Dim parts() As String
+    Dim i As Long
+    Dim col As String
+
+    parts = Split(csv, ",")
     For i = LBound(parts) To UBound(parts)
         col = Trim$(parts(i))
-        If Len(col) > 0 And ColumnIndexOrZero(lo, col) = 0 Then
-            ValidateInlineChart = "Baseline series '" & col & "' is missing on " & _
-                                  spec.baselineTable & "."
+        If Len(col) = 0 Then
+        ElseIf ColumnIndexOrZero(lo, col) = 0 Then
+            ValidateChartColumns = role & " column '" & col & "' is missing on " & lo.Name & "."
+            Exit Function
+        ElseIf ChartMetricIds(lo.Name, col).count = 0 Then
+            ValidateChartColumns = role & " column '" & col & "' has no metrics in " & _
+                                   MetricCatalogueTableName() & ", so it plots nothing. " & _
+                                   "Sync the metrics."
             Exit Function
         End If
     Next
@@ -704,47 +732,281 @@ Public Function NamedChartChoices() As ChartSpec()
     NamedChartChoices = ScenarioOutputCharts()
 End Function
 
-Public Function SourceTableChoices() As String()
-    Dim ws As Worksheet, lo As ListObject
-    Dim names() As String
-    Dim n As Long
+'---------------------------------------------------------------------------------------
+' Chart picker: Source -> X -> Series
+'---------------------------------------------------------------------------------------
+'
+' Charts plot stored results, and a stored result is one catalogued (row, column) cell
+' of a source table, so the chart lists come from the catalogue rather than from every
+' table in the workbook. Source is each table the catalogue scans, X is that table's
+' row-key column (or a catalogued column, for an x axis read from the data), and Series
+' is each catalogued column. A column is listed whether or not it is ticked Include;
+' its status says what still needs doing.
 
-    ReDim names(1 To 128)
-    For Each ws In ThisWorkbook.Worksheets
-        For Each lo In ws.ListObjects
-            n = n + 1
-            If n > UBound(names) Then ReDim Preserve names(1 To n + 64)
-            names(n) = lo.Name
-        Next
-    Next
-    If n = 0 Then
-        SourceTableChoices = Split(vbNullString)
+' Distinct catalogued source tables, sorted.
+Public Function ChartSourceChoices() As String()
+    Dim specs() As MetricSpec
+    Dim seen As Object
+    Dim i As Long
+
+    Set seen = NewTextSet()
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If Len(specs(i).sourceTable) > 0 Then AddDistinct seen, specs(i).sourceTable
+    Next i
+    ChartSourceChoices = TextSetToArray(seen, True)
+End Function
+
+' The column holding the row keys, or "" for a single-row source.
+Public Function ChartRowKeyColumn(source As String) As String
+    Dim specs() As MetricSpec
+    Dim i As Long
+
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If KeyMatches(specs(i).sourceTable, source) And Len(specs(i).labelColumn) > 0 Then
+            ChartRowKeyColumn = specs(i).labelColumn
+            Exit Function
+        End If
+    Next i
+End Function
+
+' The row-key column first, as it's the usual x axis, then the catalogued columns.
+Public Function ChartXChoices(source As String) As String()
+    Dim seen As Object
+    Dim key As Variant
+
+    Set seen = NewTextSet()
+    If Len(ChartRowKeyColumn(source)) > 0 Then AddDistinct seen, ChartRowKeyColumn(source)
+    For Each key In ChartColumnSet(source).keys
+        AddDistinct seen, CStr(key)
+    Next key
+    ChartXChoices = TextSetToArray(seen, False)
+End Function
+
+' Catalogued columns of source, in catalogue (column) order.
+Public Function ChartSeriesChoices(source As String) As String()
+    ChartSeriesChoices = TextSetToArray(ChartColumnSet(source), False)
+End Function
+
+' Include status of each catalogued column of source, parallel to ChartSeriesChoices,
+' gathered in one pass over the catalogue.
+Public Function ChartColumnStatuses(source As String) As String()
+    Dim specs() As MetricSpec
+    Dim byColumn As Object, colIds As Object
+    Dim key As Variant
+    Dim out() As String
+    Dim i As Long
+
+    Set byColumn = NewTextSet()
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If KeyMatches(specs(i).sourceTable, source) And Len(specs(i).sourceColumn) > 0 Then
+            If Not byColumn.Exists(specs(i).sourceColumn) Then _
+                byColumn.Add specs(i).sourceColumn, NewTextSet()
+            Set colIds = byColumn(specs(i).sourceColumn)
+            colIds(specs(i).metric) = specs(i).include
+        End If
+    Next i
+
+    If byColumn.count = 0 Then
+        ChartColumnStatuses = Split(vbNullString)
         Exit Function
     End If
 
-    ReDim Preserve names(1 To n)
-    SortStringArray names
-    SourceTableChoices = names
+    ReDim out(1 To byColumn.count)
+    i = 0
+    For Each key In byColumn.keys
+        i = i + 1
+        out(i) = IncludeStatusText(byColumn(key))
+    Next key
+    ChartColumnStatuses = out
 End Function
 
-Public Function TableColumnChoices(tableName As String) As String()
+Private Function ChartColumnSet(source As String) As Object
+    Dim specs() As MetricSpec
+    Dim seen As Object
+    Dim i As Long
+
+    Set seen = NewTextSet()
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If KeyMatches(specs(i).sourceTable, source) And Len(specs(i).sourceColumn) > 0 Then
+            AddDistinct seen, specs(i).sourceColumn
+        End If
+    Next i
+    Set ChartColumnSet = seen
+End Function
+
+'---------------------------------------------------------------------------------------
+' Include status
+'---------------------------------------------------------------------------------------
+'
+' A metric token or chart series only has data once its metrics are ticked Include in
+' the catalogue and a run has stored them, so the form shows where a pick stands and
+' can tick whatever is missing. A pick is gathered as a set of metric ID -> Include
+' flag. "Run" means tblScenarioResults holds the metric under at least one scenario;
+' that table is read once and cached until ForgetStoredMetrics, so clicking through a
+' series list doesn't re-read it on every click.
+
+Public Function MetricIncludeStatus(metricId As String) As String
+    MetricIncludeStatus = IncludeStatusText(MetricPickIds(metricId))
+End Function
+
+Public Function ChartIncludeStatus(source As String, columns As String) As String
+    ChartIncludeStatus = IncludeStatusText(ChartMetricIds(source, columns))
+End Function
+
+Public Function IncludeMetricPick(metricId As String) As Long
+    IncludeMetricPick = SetMetricsIncluded(MetricPickIds(metricId))
+End Function
+
+Public Function IncludeChartPick(source As String, columns As String) As Long
+    IncludeChartPick = SetMetricsIncluded(ChartMetricIds(source, columns))
+End Function
+
+Public Sub ForgetStoredMetrics()
+    Set storedMetrics = Nothing
+End Sub
+
+' The metrics behind a metric token: the one ID, or every match of a wildcard ID.
+Private Function MetricPickIds(metricId As String) As Object
+    Dim specs() As MetricSpec
+    Dim ids As Object
+    Dim i As Long
+
+    Set ids = NewTextSet()
+    Set MetricPickIds = ids
+    If Len(metricId) = 0 Then Exit Function
+
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If IsWildcardMetricId(metricId) Then
+            If MatchesWildcardMetric(metricId, specs(i)) Then _
+                ids(specs(i).metric) = specs(i).include
+        ElseIf KeyMatches(specs(i).metric, metricId) Then
+            ids(specs(i).metric) = specs(i).include
+        End If
+    Next i
+End Function
+
+' The metrics behind chart columns: every row's cell in each column of the
+' comma-separated list, or in every column for "*".
+Private Function ChartMetricIds(source As String, columns As String) As Object
+    Dim specs() As MetricSpec
+    Dim ids As Object, wanted As Object
+    Dim parts() As String
+    Dim i As Long
+
+    Set ids = NewTextSet()
+    Set ChartMetricIds = ids
+
+    Set wanted = NewTextSet()
+    parts = Split(columns, ",")
+    For i = LBound(parts) To UBound(parts)
+        If Len(Trim$(parts(i))) > 0 Then AddDistinct wanted, Trim$(parts(i))
+    Next i
+    If wanted.count = 0 Then Exit Function
+
+    specs = CatalogueSpecs(False)
+    For i = 1 To MetricSpecCount(specs)
+        If KeyMatches(specs(i).sourceTable, source) Then
+            If wanted.Exists("*") Or wanted.Exists(specs(i).sourceColumn) Then
+                ids(specs(i).metric) = specs(i).include
+            End If
+        End If
+    Next i
+End Function
+
+' Short status for a pick: "ready" once every metric is included and run, otherwise
+' what's missing, e.g. "3/12 included" or "included, 0/12 run". "" for an empty pick.
+Private Function IncludeStatusText(ids As Object) As String
+    Dim total As Long, nIncluded As Long, nRun As Long
+
+    CountPick ids, total, nIncluded, nRun
+    If total = 0 Then Exit Function
+
+    If nIncluded = 0 Then
+        IncludeStatusText = "not included"
+    ElseIf nIncluded < total Then
+        IncludeStatusText = nIncluded & "/" & total & " included"
+    ElseIf nRun = 0 Then
+        IncludeStatusText = "included, not run"
+    ElseIf nRun < total Then
+        IncludeStatusText = "included, " & nRun & "/" & total & " run"
+    Else
+        IncludeStatusText = "ready"
+    End If
+End Function
+
+' True for a status from IncludeStatusText that still has unticked metrics, which is
+' when the form's Include button has something to do.
+Public Function StatusNeedsInclude(status As String) As Boolean
+    StatusNeedsInclude = (status = "not included" Or status Like "*/* included")
+End Function
+
+' The banner line for a pick that isn't ready yet, or "" when it is (or is empty).
+Private Function IncludeAdvice(ids As Object) As String
+    Dim total As Long, nIncluded As Long, nRun As Long
+
+    CountPick ids, total, nIncluded, nRun
+    If total = 0 Then Exit Function
+
+    If nIncluded < total Then
+        If total = 1 Then
+            IncludeAdvice = "This metric isn't ticked Include in " & MetricCatalogueTableName() & _
+                            ", so nothing is stored for it. Press Include, then run the scenarios."
+        Else
+            IncludeAdvice = (total - nIncluded) & " of " & total & " metrics behind this " & _
+                            "pick aren't ticked Include in " & MetricCatalogueTableName() & _
+                            ", so they have no stored values. Press Include, then run the scenarios."
+        End If
+    ElseIf nRun < total Then
+        If total = 1 Then
+            IncludeAdvice = "This metric is included but hasn't been run yet. " & _
+                            "Run the scenarios to store it."
+        Else
+            IncludeAdvice = (total - nRun) & " of " & total & " metrics behind this pick " & _
+                            "are included but haven't been run yet. Run the scenarios to store them."
+        End If
+    End If
+End Function
+
+Private Sub CountPick(ids As Object, ByRef total As Long, ByRef nIncluded As Long, _
+                      ByRef nRun As Long)
+    Dim stored As Object
+    Dim key As Variant
+
+    Set stored = StoredMetricSet()
+    total = ids.count
+    For Each key In ids.keys
+        If ids(key) Then
+            nIncluded = nIncluded + 1
+            If stored.Exists(CStr(key)) Then nRun = nRun + 1
+        End If
+    Next key
+End Sub
+
+' Every metric ID with at least one row in tblScenarioResults.
+Private Function StoredMetricSet() As Object
     Dim lo As ListObject
-    Dim names() As String
-    Dim i As Long, n As Long
+    Dim body As Variant
+    Dim col As Long, r As Long
 
-    TableColumnChoices = Split(vbNullString)
-
-    Set lo = TableOrNothing(tableName)
-    If lo Is Nothing Then Exit Function
-
-    n = lo.ListColumns.count
-    If n = 0 Then Exit Function
-
-    ReDim names(1 To n)
-    For i = 1 To n
-        names(i) = lo.ListColumns(i).Name
-    Next
-    TableColumnChoices = names
+    If storedMetrics Is Nothing Then
+        Set storedMetrics = NewTextSet()
+        Set lo = TableOrNothing(ResultsTableName())
+        If Not lo Is Nothing Then
+            col = ColumnIndexOrZero(lo, COL_RESULT_METRIC)
+            body = TableBody(lo)
+            If col > 0 And Not IsEmpty(body) Then
+                For r = 1 To UBound(body, 1)
+                    AddDistinct storedMetrics, Trim$(CStr(body(r, col)))
+                Next r
+            End If
+        End If
+    End If
+    Set StoredMetricSet = storedMetrics
 End Function
 
 '---------------------------------------------------------------------------------------

@@ -71,6 +71,11 @@ Public Function MetricCatalogueTableName() As String
     MetricCatalogueTableName = TBL_METRIC_CATALOGUE
 End Function
 
+' tblScenarios column holding each scenario's effective date, edited in frmScenarioEditor.
+Public Function EffectiveDateColumn() As String
+    EffectiveDateColumn = COL_EFFECTIVE_DATE
+End Function
+
 '=======================================================================================
 ' Current state
 '=======================================================================================

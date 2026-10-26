@@ -351,6 +351,32 @@ Public Function SetAllIncluded(ByVal flag As Boolean) As Long
     SetAllIncluded = n
 End Function
 
+' Ticks Include on every catalogue row whose metric ID is a key of metricIds, so the
+' token builder can include exactly what a pick needs. Returns how many rows changed.
+Public Function SetMetricsIncluded(metricIds As Object) As Long
+    Dim lo As ListObject
+    Dim body As Variant
+    Dim cMetric As Long, cInclude As Long
+    Dim r As Long, n As Long
+
+    Set lo = EnsureCatalogue()
+    body = TableBody(lo)
+    If IsEmpty(body) Then Exit Function
+
+    cMetric = RequireColumnIndex(lo, COL_CAT_METRIC)
+    cInclude = RequireColumnIndex(lo, COL_CAT_INCLUDE)
+    For r = 1 To UBound(body, 1)
+        If metricIds.Exists(Trim$(CStr(body(r, cMetric)))) Then
+            If Not IsTruthyValue(body(r, cInclude)) Then
+                lo.DataBodyRange.Cells(r, cInclude).value = True
+                n = n + 1
+            End If
+        End If
+    Next r
+
+    SetMetricsIncluded = n
+End Function
+
 ' Sets the Include flag on whatever rows of the catalogue the user has selected, so
 ' picking metrics is "highlight the rows, press the button". Returns how many changed,
 ' or -1 when the selection does not touch the catalogue at all.

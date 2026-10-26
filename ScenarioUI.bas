@@ -7,40 +7,157 @@ Option Explicit
 ' Assign one macro per button. The picker is the cell named scenarioPicker, validated
 ' against the Name column of tblScenarios.
 
-Private Const MANAGER_SHEET As String = "05_SCN_Manager"
+Private Const MANAGER_SHEET As String = "04_SCN_Manager"
 Private Const NAME_PICKER As String = "scenarioPicker"
 Private Const NAME_STATUS As String = "scenarioStatus"
 Private Const NAME_ACTIVE_NAME As String = "activeScenarioName"
 
-Public Sub NewScenarioButton()
-    Dim displayName As String
-    Dim description As String
-    Dim scenarioId As String
+Private Const EDITOR_FORM As String = "frmScenarioEditor"
 
+' Opens frmScenarioEditor in new mode. Creating loads the new scenario over the active
+' tables, so unsaved edits are confirmed away before the form opens.
+Public Sub NewScenarioButton()
     On Error GoTo Failed
     If Not ConfirmDiscardIfDirty("Create a new scenario") Then Exit Sub
 
-    displayName = Trim$(InputBox("Name for the new scenario:", "New Scenario", SuggestedName()))
-    If Len(displayName) = 0 Then Exit Sub
-
-    If Not NameIsAvailable(displayName) Then
-        MsgBox "A scenario named '" & displayName & "' already exists.", vbExclamation
-        Exit Sub
-    End If
-
-    description = Trim$(InputBox("Description (optional):", "New Scenario"))
-
-    scenarioId = NewScenario(displayName, description)
-    RefreshScenarioManager
-
-    MsgBox "Created '" & displayName & "' (" & scenarioId & ")." & vbNewLine & vbNewLine & _
-           "It starts from the blank default. Set the effective date, enter the ATL " & _
-           "adjustments and the BTL discretions, then save.", vbInformation
+    OpenScenarioEditor newMode:=True
     Exit Sub
 
 Failed:
     ReportFailure "create the scenario"
 End Sub
+
+' Opens frmScenarioEditor on the scenario in the picker, else the loaded one.
+Public Sub EditScenarioButton()
+    On Error GoTo Failed
+    OpenScenarioEditor DefaultEditScenarioId()
+    Exit Sub
+
+Failed:
+    ReportFailure "open the scenario editor"
+End Sub
+
+' Kept so a Rename shape assigned before the editor existed still does something useful.
+Public Sub RenameScenarioButton()
+    EditScenarioButton
+End Sub
+
+' Shows the editor modally. scenarioId is the one to open on; "" or an unknown ID opens
+' on the first scenario. Late bound so the rest of the project compiles without the form.
+Public Sub OpenScenarioEditor(Optional scenarioId As String = "", _
+                              Optional newMode As Boolean = False)
+    Dim frm As Object
+    Dim createdId As String
+
+    On Error GoTo FormMissing
+    Set frm = UserForms.Add(EDITOR_FORM)
+    On Error GoTo 0
+
+    If newMode Then
+        frm.StartNew
+    Else
+        frm.Preselect scenarioId
+    End If
+    frm.Show vbModal
+
+    ' The form hides rather than unloads, so its outcome can still be read here.
+    createdId = frm.CreatedScenarioId
+    Unload frm
+
+    If Len(createdId) > 0 Then
+        MsgBox "Created '" & ScenarioName(createdId) & "' (" & createdId & ")." & vbNewLine & _
+               vbNewLine & "It starts from the blank default. Enter the ATL adjustments " & _
+               "and the BTL discretions, then save.", vbInformation
+    End If
+    Exit Sub
+
+FormMissing:
+    MsgBox EDITOR_FORM & " is not in this workbook yet." & vbNewLine & vbNewLine & _
+           "See " & EDITOR_FORM & "_SETUP.md in the project folder for how to add it. " & _
+           "Once it's in place, save the workbook and this button will open it.", _
+           vbInformation, "Scenario editor"
+End Sub
+
+' For Worksheet_BeforeDoubleClick on the manager sheet. A double-click on a scenario row
+' opens the editor on it; anywhere else in tblScenarios explains the table is read-only.
+' Returns True when the click was handled, so the sheet can cancel Excel's own response.
+Public Function HandleScenarioTableDoubleClick(target As Range) As Boolean
+    Dim lo As ListObject
+    Dim scenarioId As String
+
+    On Error GoTo Failed
+    Set lo = TableOrNothing(TBL_SCENARIOS)
+    If lo Is Nothing Then Exit Function
+    If Not target.Worksheet Is lo.Parent Then Exit Function
+    If Application.Intersect(target.Cells(1), lo.Range) Is Nothing Then Exit Function
+
+    HandleScenarioTableDoubleClick = True
+
+    If lo.DataBodyRange Is Nothing Then
+        MsgBox TBL_SCENARIOS & " is read-only. Use the New Scenario button to add one.", _
+               vbInformation
+        Exit Function
+    End If
+    If Application.Intersect(target.Cells(1), lo.DataBodyRange) Is Nothing Then
+        MsgBox TBL_SCENARIOS & " is read-only. Use the Edit Scenario button, or " & _
+               "double-click a scenario's row.", vbInformation
+        Exit Function
+    End If
+
+    scenarioId = Trim$(CStr(CellInRow(lo, target.Row - lo.DataBodyRange.Row + 1, _
+                                      COL_SCENARIO_ID).value))
+    If IsCurrentStateId(scenarioId) Then
+        MsgBox "The current state isn't an editable scenario. Use Run Current State to " & _
+               "refresh it.", vbInformation
+        Exit Function
+    End If
+
+    OpenScenarioEditor scenarioId
+    Exit Function
+
+Failed:
+    ReportFailure "open the scenario editor"
+End Function
+
+' What a new scenario starts with in the editor.
+Public Function NewScenarioDefaults() As ScenarioDetails
+    With NewScenarioDefaults
+        .displayName = SuggestedName()
+        .effectiveDate = Date
+        .includeInRun = True
+        .includeInCompare = True
+    End With
+End Function
+
+' Called by the editor's Create button once the details have passed
+' ScenarioDetailsProblem. Returns the new ID.
+Public Function CreateScenarioFromEditor(details As ScenarioDetails) As String
+    CreateScenarioFromEditor = NewScenario(Trim$(details.displayName), _
+                                           Trim$(details.description), _
+                                           CDate(details.effectiveDate), _
+                                           details.includeInRun, details.includeInCompare)
+    RefreshScenarioManager
+End Function
+
+' Called by the editor's Save button. Returns a warning for the user, or "".
+Public Function SaveScenarioFromEditor(details As ScenarioDetails) As String
+    Dim before As ScenarioDetails
+
+    before = ReadScenarioDetails(details.scenarioId)
+    UpdateScenarioDetails details
+
+    RepointPicker NAME_PICKER, before.displayName, Trim$(details.displayName)
+    RepointPicker OutputScenarioPickerName(), before.displayName, Trim$(details.displayName)
+    RefreshScenarioManager
+
+    If Not SameDate(before.effectiveDate, details.effectiveDate) Then
+        If HasStoredResults(details.scenarioId) Then
+            SaveScenarioFromEditor = "The stored results for '" & Trim$(details.displayName) & _
+                                     "' were run with the old effective date. Run it " & _
+                                     "again to refresh them."
+        End If
+    End If
+End Function
 
 Public Sub LoadScenarioButton()
     Dim scenarioId As String
@@ -124,26 +241,6 @@ Public Sub SaveScenarioAsButton()
 
 Failed:
     ReportFailure "save a copy of the scenario"
-End Sub
-
-Public Sub RenameScenarioButton()
-    Dim scenarioId As String
-    Dim newName As String
-
-    On Error GoTo Failed
-    scenarioId = PickedScenarioId()
-    If Len(scenarioId) = 0 Then Exit Sub
-
-    newName = Trim$(InputBox("New name for '" & ScenarioName(scenarioId) & "':", _
-                             "Rename Scenario", ScenarioName(scenarioId)))
-    If Len(newName) = 0 Then Exit Sub
-
-    RenameScenario scenarioId, newName
-    RefreshScenarioManager
-    Exit Sub
-
-Failed:
-    ReportFailure "rename the scenario"
 End Sub
 
 Public Sub DeleteScenarioButton()
@@ -480,8 +577,60 @@ Private Function ConfirmDiscardIfDirty(action As String) As Boolean
                                     "Unsaved Changes") = vbYes)
 End Function
 
+' "Scenario 26 Oct 2026", or "... (2)" and so on when that name is already taken.
 Private Function SuggestedName() As String
-    SuggestedName = "Scenario " & Format$(Date, "dd mmm yyyy")
+    Dim stem As String
+    Dim n As Long
+
+    stem = "Scenario " & Format$(Date, "dd mmm yyyy")
+    SuggestedName = stem
+    n = 1
+    Do While Not NameIsAvailable(SuggestedName)
+        n = n + 1
+        SuggestedName = stem & " (" & n & ")"
+    Loop
+End Function
+
+' The scenario the editor opens on: the picker's, else the loaded one, never the current
+' state. "" lets the form fall back to the first scenario.
+Private Function DefaultEditScenarioId() As String
+    Dim cell As Range
+    Dim scenarioId As String
+
+    Set cell = NamedRangeOrNothing(NAME_PICKER)
+    If Not cell Is Nothing Then
+        If Len(Trim$(CStr(cell.value))) > 0 Then scenarioId = ScenarioIdForName(CStr(cell.value))
+    End If
+    If Len(scenarioId) = 0 Or IsCurrentStateId(scenarioId) Then scenarioId = ActiveScenarioIdVal()
+    If IsCurrentStateId(scenarioId) Then scenarioId = ""
+
+    DefaultEditScenarioId = scenarioId
+End Function
+
+' Pickers hold scenario names, so after a rename one still showing the old name would
+' point at nothing. Events are held off so the write doesn't count as the user picking.
+Private Sub RepointPicker(nameRef As String, oldName As String, newName As String)
+    Dim cell As Range
+    Dim priorEvents As Boolean
+
+    If StrComp(oldName, newName, vbBinaryCompare) = 0 Then Exit Sub
+
+    Set cell = NamedRangeOrNothing(nameRef)
+    If cell Is Nothing Then Exit Sub
+    If StrComp(Trim$(CStr(cell.value)), oldName, vbTextCompare) <> 0 Then Exit Sub
+
+    priorEvents = Application.EnableEvents
+    Application.EnableEvents = False
+    cell.value = newName
+    Application.EnableEvents = priorEvents
+End Sub
+
+Private Function SameDate(a As Variant, b As Variant) As Boolean
+    If IsDate(a) And IsDate(b) Then
+        SameDate = (CDate(a) = CDate(b))
+    Else
+        SameDate = (CStr(a) = CStr(b))
+    End If
 End Function
 
 Private Sub ReportFailure(action As String)

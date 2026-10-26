@@ -197,9 +197,9 @@ only matter in the designer.
 | `cboInlineX`           | ComboBox | 85   | 78  | 240   | 18     |                 |                                    |
 | `lblInlineSeries`      | Label    | 10   | 102 | 70    | 15     | `Series:`       |                                    |
 | `lstInlineSeries`      | ListBox  | 85   | 100 | 240   | 54     |                 | `MultiSelect` = `1 - fmMultiSelectMulti` |
-| `lblInlineBase`        | Label    | 10   | 160 | 70    | 15     | `Baseline tbl:` |                                    |
-| `cboInlineBase`        | ComboBox | 85   | 158 | 240   | 18     |                 |                                    |
-| `lblInlineBaseSeries`  | Label    | 10   | 182 | 70    | 15     | `B. series:`    |                                    |
+| `lblInlineBase`        | Label    | 10   | 160 | 70    | 15     | `Baseline tbl:` | Hidden at runtime (see below)      |
+| `cboInlineBase`        | ComboBox | 85   | 158 | 240   | 18     |                 | Hidden at runtime (see below)      |
+| `lblInlineBaseSeries`  | Label    | 10   | 182 | 70    | 15     | `B. series:`    | Renamed `Vs current:` at runtime   |
 | `lstInlineBaseSeries`  | ListBox  | 85   | 180 | 240   | 54     |                 | `MultiSelect` = `1 - fmMultiSelectMulti` |
 | `lblInlineTitle`       | Label    | 10   | 240 | 70    | 15     | `Title:`        |                                    |
 | `txtInlineTitle`       | TextBox  | 85   | 238 | 240   | 18     |                 |                                    |
@@ -210,6 +210,28 @@ only matter in the designer.
 | `txtInlineHeight`      | TextBox  | 85   | 282 | 50    | 18     |                 |                                    |
 | `lblInlineWidth`       | Label    | 150  | 284 | 50    | 15     | `Width:`        |                                    |
 | `txtInlineWidth`       | TextBox  | 205  | 282 | 50    | 18     |                 |                                    |
+
+Charts plot stored scenario results, and their baseline is always the current
+state's stored values for the same table. So the code hides the baseline-table
+combo when the form opens and puts the include row (below) in its place. Keep
+`lblInlineBase` and `cboInlineBase` on the form, because the code refers to them.
+The two series lists get a second column, set in code, showing each column's
+include status.
+
+### Include row (Metric value and Chart (inline) panels)
+
+Nothing to add in the designer. The form builds these when it opens
+(`BuildIncludeRow`) and moves them under whichever of the two panels is showing:
+row 208 for Metric value, where the value format row then drops to 232, and
+row 158 for Chart (inline).
+
+| Created in code       | Type          | Caption    |
+|-----------------------|---------------|------------|
+| `lblIncludeStatus`    | Label         | `Status:`  |
+| `lblIncludeStatusVal` | Label         | the pick's include status |
+| `btnInclude`          | CommandButton | `Include`  |
+
+Don't add controls with these names in the designer.
 
 ### Banner, preview, action buttons (always visible)
 
@@ -268,6 +290,14 @@ Private lblSegmentCol As MSForms.Label
 Private lblSegmentValue As MSForms.Label
 Private lblSegmentValueVal As MSForms.Label
 
+' The include row is built in code too, and shared by the metric and inline chart panels:
+' where the pick stands (ticked Include? run?) and a button that ticks what's missing.
+Private Const INCLUDE_ROW_METRIC As Single = 208
+Private Const INCLUDE_ROW_CHART As Single = 158
+Private WithEvents btnInclude As MSForms.CommandButton
+Private lblIncludeStatus As MSForms.Label
+Private lblIncludeStatusVal As MSForms.Label
+
 Private Sub UserForm_Initialize()
     ' Set at runtime because the VBE designer rescales these under Windows
     ' display scaling (e.g. 125%) and won't keep typed values.
@@ -275,7 +305,10 @@ Private Sub UserForm_Initialize()
     Me.Height = 620
     seriesListBox = CaptureBox(lstInlineSeries)
     baseSeriesListBox = CaptureBox(lstInlineBaseSeries)
+    ForgetStoredMetrics
     BuildSegmentPanel
+    BuildIncludeRow
+    PrepareInlineChartPanel
     ApplyTabOrder
     PopulateKindCombo
     PopulateMetricSourceCombo
@@ -306,7 +339,7 @@ Private Sub ApplyTabOrder()
                   cboValueFormat, _
                   cboChartNamed, _
                   cboInlineKind, cboInlineSource, cboInlineX, lstInlineSeries, _
-                  cboInlineBase, lstInlineBaseSeries, txtInlineTitle, _
+                  btnInclude, lstInlineBaseSeries, txtInlineTitle, _
                   txtInlineFormat, chkInlineLegend, txtInlineHeight, txtInlineWidth, _
                   txtPreview, btnCopy, btnSave, btnCancel, btnClose, _
                   lstSaved, btnLibCopy, btnLibEdit, btnLibDelete)
@@ -405,6 +438,41 @@ Private Sub BuildSegmentPanel()
     lblSegmentValueVal.Width = Me.InsideWidth - cboScenarioCol.Left - lblScenarioCol.Left
 End Sub
 
+Private Sub BuildIncludeRow()
+    Set lblIncludeStatus = AddPanelLabel("lblIncludeStatus", "Status:", 0)
+    Set lblIncludeStatusVal = AddPanelLabel("lblIncludeStatusVal", "", 0)
+    lblIncludeStatusVal.Left = cboScenarioCol.Left
+    lblIncludeStatusVal.Width = 150
+    Set btnInclude = Me.Controls.Add("Forms.CommandButton.1", "btnInclude")
+    btnInclude.Left = cboScenarioCol.Left + 160
+    btnInclude.Width = 80
+    btnInclude.Height = cboScenarioCol.Height
+    btnInclude.Font.Name = cboScenarioCol.Font.Name
+    btnInclude.Font.Size = cboScenarioCol.Font.Size
+    btnInclude.Caption = "Include"
+    btnInclude.ControlTipText = "Tick Include in the metric catalogue for everything this pick needs"
+End Sub
+
+Private Sub PlaceIncludeRow(ByVal rowTop As Single)
+    lblIncludeStatus.Top = rowTop + (lblScenarioCol.Top - cboScenarioCol.Top)
+    lblIncludeStatusVal.Top = lblIncludeStatus.Top
+    btnInclude.Top = rowTop
+End Sub
+
+' Charts plot stored results, whose baseline is always the current state's values for
+' the same source, so the designer's baseline-table combo is retired and its series
+' list becomes "compare with the current state" over the same columns. The include row
+' takes the combo's place. Both series lists show each column's include status.
+Private Sub PrepareInlineChartPanel()
+    lblInlineBase.Visible = False
+    cboInlineBase.Visible = False
+    lblInlineBaseSeries.Caption = "Vs current:"
+    lstInlineSeries.ColumnCount = 2
+    lstInlineSeries.ColumnWidths = "120;110"
+    lstInlineBaseSeries.ColumnCount = 2
+    lstInlineBaseSeries.ColumnWidths = "120;110"
+End Sub
+
 Private Function AddPanelLabel(name As String, caption As String, _
                                ByVal rowTop As Single) As MSForms.Label
     Dim lbl As MSForms.Label
@@ -473,18 +541,9 @@ Private Sub PopulateInlineKindCombo()
     cboInlineKind.ListIndex = 0
 End Sub
 
+' Only tables the metric catalogue scans: nothing else has stored results to plot.
 Private Sub PopulateSourceCombos()
-    Dim names() As String, i As Long
-    cboInlineSource.Clear
-    cboInlineBase.Clear
-    cboInlineBase.AddItem ""
-    names = SourceTableChoices()
-    If (LBound(names) <= UBound(names)) Then
-        For i = LBound(names) To UBound(names)
-            cboInlineSource.AddItem names(i)
-            cboInlineBase.AddItem names(i)
-        Next i
-    End If
+    FillCombo cboInlineSource, ChartSourceChoices()
 End Sub
 
 Private Sub ApplyKindVisibility()
@@ -512,15 +571,17 @@ Private Sub ApplyKindVisibility()
     ElseIf sg Then
         PlaceValueFormatRow cboSegmentId.Top + 3 * SEGMENT_ROW_STEP
     Else
-        PlaceValueFormatRow 212
+        PlaceValueFormatRow INCLUDE_ROW_METRIC + SEGMENT_ROW_STEP + 2
     End If
+    SetGroup Array(lblIncludeStatus, lblIncludeStatusVal, btnInclude), m Or ci
+    If ci Then PlaceIncludeRow INCLUDE_ROW_CHART Else PlaceIncludeRow INCLUDE_ROW_METRIC
     SetGroup Array(lblChartNamed, cboChartNamed, lblChartNamedKind, _
                    lblChartNamedKindVal, lblChartNamedSource, _
                    lblChartNamedSourceVal, lblChartNamedSeries, _
                    lblChartNamedSeriesVal), cn
     SetGroup Array(lblInlineKind, cboInlineKind, lblInlineSource, _
                    cboInlineSource, lblInlineX, cboInlineX, lblInlineSeries, _
-                   lstInlineSeries, lblInlineBase, cboInlineBase, _
+                   lstInlineSeries, _
                    lblInlineBaseSeries, lstInlineBaseSeries, lblInlineTitle, _
                    txtInlineTitle, lblInlineFormat, txtInlineFormat, _
                    chkInlineLegend, lblInlineHeight, txtInlineHeight, _
@@ -540,13 +601,17 @@ Private Sub SetGroup(controls As Variant, visible As Boolean)
     Next i
 End Sub
 
+' Switching kind or source re-reads tblScenarioResults, so a run made while the form
+' was open shows up in the include status.
 Private Sub cboTokenKind_Change()
+    ForgetStoredMetrics
     ApplyKindVisibility
     RebuildPreview
 End Sub
 
 Private Sub cboMetricSource_Change()
     If suppressRefresh Then Exit Sub
+    ForgetStoredMetrics
     FillMetricSegments
     RefreshMetricReadout
     RebuildPreview
@@ -640,12 +705,8 @@ Private Sub RefreshNamedChartReadout()
 End Sub
 
 Private Sub cboInlineSource_Change()
-    RefreshInlineColumnLists False
-    RebuildPreview
-End Sub
-
-Private Sub cboInlineBase_Change()
-    RefreshInlineColumnLists True
+    ForgetStoredMetrics
+    RefreshInlineColumnLists
     RebuildPreview
 End Sub
 
@@ -677,27 +738,79 @@ Private Sub txtInlineWidth_Change()
     If Not suppressRefresh Then RebuildPreview
 End Sub
 
-Private Sub RefreshInlineColumnLists(baselineSide As Boolean)
-    Dim names() As String, i As Long
-    If Not baselineSide Then
-        cboInlineX.Clear
-        lstInlineSeries.Clear
-        If Len(cboInlineSource.Value) > 0 Then
-            names = TableColumnChoices(cboInlineSource.Value)
-            For i = LBound(names) To UBound(names)
-                cboInlineX.AddItem names(i)
-                lstInlineSeries.AddItem names(i)
-            Next i
-        End If
-    End If
+' X defaults to the source's row-key column. Both series lists carry the same catalogued
+' columns, each with its include status alongside.
+Private Sub RefreshInlineColumnLists()
+    Dim prior As Boolean
+    Dim names() As String, statuses() As String, i As Long
+    prior = suppressRefresh
+    suppressRefresh = True
+    cboInlineX.Clear
+    lstInlineSeries.Clear
     lstInlineBaseSeries.Clear
-    If Len(cboInlineBase.Value) > 0 Then
-        names = TableColumnChoices(cboInlineBase.Value)
+    If Len(cboInlineSource.Value) > 0 Then
+        FillCombo cboInlineX, ChartXChoices(cboInlineSource.Value)
+        SelectComboValue cboInlineX, ChartRowKeyColumn(cboInlineSource.Value)
+        names = ChartSeriesChoices(cboInlineSource.Value)
+        statuses = ChartColumnStatuses(cboInlineSource.Value)
         For i = LBound(names) To UBound(names)
+            lstInlineSeries.AddItem names(i)
+            lstInlineSeries.List(lstInlineSeries.ListCount - 1, 1) = statuses(i)
             lstInlineBaseSeries.AddItem names(i)
+            lstInlineBaseSeries.List(lstInlineBaseSeries.ListCount - 1, 1) = statuses(i)
         Next i
     End If
     PinInlineLists
+    suppressRefresh = prior
+End Sub
+
+' Rewrites the status column in place, so the user's ticks survive an Include.
+Private Sub RefreshInlineColumnStatuses()
+    Dim statuses() As String, i As Long
+    If Len(cboInlineSource.Value) = 0 Then Exit Sub
+    statuses = ChartColumnStatuses(cboInlineSource.Value)
+    For i = 0 To lstInlineSeries.ListCount - 1
+        If i + 1 > UBound(statuses) Then Exit For
+        lstInlineSeries.List(i, 1) = statuses(i + 1)
+        lstInlineBaseSeries.List(i, 1) = statuses(i + 1)
+    Next i
+End Sub
+
+' Status of whatever the visible panel points at. Blank for a Label token, which reads
+' the catalogue rather than a stored result.
+Private Sub RefreshIncludeStatus()
+    Dim status As String
+    Select Case cboTokenKind.ListIndex
+        Case 0
+            If SelectedFlavour <> KIND_LABEL Then status = MetricIncludeStatus(CurrentMetricId())
+        Case 3
+            status = ChartIncludeStatus(cboInlineSource.Value, InlineColumnsPicked())
+    End Select
+    lblIncludeStatusVal.Caption = status
+    btnInclude.Enabled = StatusNeedsInclude(status)
+End Sub
+
+' Every column ticked in either series list.
+Private Function InlineColumnsPicked() As String
+    InlineColumnsPicked = JoinSelected(lstInlineSeries) & "," & JoinSelected(lstInlineBaseSeries)
+End Function
+
+Private Sub btnInclude_Click()
+    Dim changed As Long
+    On Error GoTo Failed
+    Select Case cboTokenKind.ListIndex
+        Case 0: changed = IncludeMetricPick(CurrentMetricId())
+        Case 3: changed = IncludeChartPick(cboInlineSource.Value, InlineColumnsPicked())
+    End Select
+    RefreshInlineColumnStatuses
+    RebuildPreview
+    MsgBox changed & " metric(s) ticked Include in the catalogue." & vbNewLine & vbNewLine & _
+           "Run the scenarios (and the current state, for Current / Delta and " & _
+           "vs-current series) to store their values.", vbInformation
+    Exit Sub
+Failed:
+    MsgBox "Couldn't tick the metrics in the catalogue." & vbNewLine & vbNewLine & _
+           Err.Description, vbExclamation
 End Sub
 
 Private Sub PinInlineLists()
@@ -724,6 +837,7 @@ Private Sub RebuildPreview()
     btnSave.Caption = "Save to library"
     btnSave.Enabled = (Len(token) > 0)
     btnCopy.Enabled = (Len(token) > 0)
+    RefreshIncludeStatus
     If Len(token) > 0 Then
         lblBanner.Caption = ValidateSavedToken(token)
     Else
@@ -763,7 +877,6 @@ Private Function CurrentInlineChartSpec() As ChartSpec
     spec.sourceTable = cboInlineSource.Value
     spec.xColumn = cboInlineX.Value
     spec.seriesColumns = JoinSelected(lstInlineSeries)
-    spec.baselineTable = cboInlineBase.Value
     spec.baselineColumns = JoinSelected(lstInlineBaseSeries)
     spec.title = txtInlineTitle.text
     spec.numberFormat = txtInlineFormat.text
@@ -778,7 +891,7 @@ Private Function JoinSelected(lst As MSForms.ListBox) As String
     For i = 0 To lst.ListCount - 1
         If lst.Selected(i) Then
             If Len(out) > 0 Then out = out & ","
-            out = out & lst.List(i)
+            out = out & lst.List(i, 0)
         End If
     Next i
     JoinSelected = out
@@ -872,9 +985,8 @@ Private Sub ClearInputs()
     cboValueFormat.text = ""
     cboChartNamed.ListIndex = -1
     cboInlineSource.ListIndex = -1
-    cboInlineX.ListIndex = -1
+    cboInlineX.Clear
     lstInlineSeries.Clear
-    cboInlineBase.ListIndex = -1
     lstInlineBaseSeries.Clear
     PinInlineLists
     txtInlineTitle.text = ""
@@ -981,11 +1093,10 @@ Private Sub LoadParsedIntoControls(parsed As ParsedToken)
             cboTokenKind.ListIndex = 3
             SelectComboValue cboInlineKind, parsed.chartSpec.kind
             SelectComboValue cboInlineSource, parsed.chartSpec.sourceTable
-            RefreshInlineColumnLists False
+            RefreshInlineColumnLists
             SelectComboValue cboInlineX, parsed.chartSpec.xColumn
             SelectListBoxValues lstInlineSeries, parsed.chartSpec.seriesColumns
-            SelectComboValue cboInlineBase, parsed.chartSpec.baselineTable
-            RefreshInlineColumnLists True
+            ' An older token's baselineSource is dropped: stored charts never read it.
             SelectListBoxValues lstInlineBaseSeries, parsed.chartSpec.baselineColumns
             txtInlineTitle.text = parsed.chartSpec.title
             txtInlineFormat.text = parsed.chartSpec.numberFormat
@@ -1022,7 +1133,7 @@ Private Sub SelectListBoxValues(lst As MSForms.ListBox, csv As String)
     parts = Split(csv, ",")
     For j = LBound(parts) To UBound(parts)
         For i = 0 To lst.ListCount - 1
-            If StrComp(lst.List(i), Trim$(parts(j)), vbTextCompare) = 0 Then
+            If StrComp(lst.List(i, 0), Trim$(parts(j)), vbTextCompare) = 0 Then
                 lst.Selected(i) = True
                 Exit For
             End If
@@ -1098,6 +1209,65 @@ Where the token lands decides how the format is used:
 | Text: `NIM: {Metric.X\|0.00%}`          | The value is written as text through Excel's `TEXT()`, e.g. `NIM: 2.35%`. |
 
 If Excel rejects a format, the token behaves as though the box were blank.
+
+## Building tables and charts from scenario metrics
+
+Everything a template shows for a scenario comes from `tblScenarioResults`, not
+from the live model tables. A number only gets there when all three of these are true:
+
+1. **It's in the catalogue.** `tblScenarioMetrics` has one row per (table, row,
+   column) cell of each table listed in `MetricSourceTables()` in `ScenarioConfig`.
+   If a table or column is missing, add it there and press **Sync metrics**.
+2. **It's ticked Include** in `tblScenarioMetrics`.
+3. **The scenario has been run since it was ticked.** A run stores only included
+   metrics. `{Current.X}`, `{Delta.X}` and a chart's vs-current series also need
+   the current state to have been run.
+
+The token builder shows where each pick stands:
+
+| Status              | Meaning                                         | What to do |
+|---------------------|-------------------------------------------------|------------|
+| `ready`             | Included and stored                             | Nothing    |
+| `not included`      | Nothing behind the pick is ticked               | Press **Include**, then run the scenarios |
+| `3/12 included`     | Only some rows are ticked                       | Press **Include**, then run the scenarios |
+| `included, not run` | Ticked, but no run has stored it yet            | Run the scenarios |
+| `included, 5/12 run`| Some ticked rows were added after the last run  | Run the scenarios |
+
+**Include** ticks exactly the catalogue rows behind the current pick. It doesn't
+run anything, so run the scenarios afterwards. The yellow banner repeats the
+advice in words. "Run" counts a metric that has been stored for any scenario,
+so a scenario that hasn't been run since still shows gaps.
+
+### A table
+
+There's no separate table token. A table is metric tokens laid out across
+template rows.
+
+1. **Token kind:** `Metric value`. Pick **Source**, then **Segment**, then **Metric**.
+2. For one row per segment, choose `(all segments)` as the segment. That gives
+   a wildcard token like `{Metric.MetricsOutSegment_*_NIM}`, and the template
+   row holding it repeats once per segment.
+3. Build one token per column (NIM, Fees, ...) and put them side by side in the
+   same template row. A `Segment attribute` token with `(all segments)` in the
+   first column labels each row.
+4. Check each token shows `ready` before you paste it.
+
+### A chart
+
+1. **Token kind:** `Chart (inline)`.
+2. **Source** only lists tables the catalogue scans, because nothing else has
+   stored data to plot.
+3. **X column** defaults to the table's row-key column (one point per row).
+4. Tick one or more **Series** columns. The status beside each column says
+   whether it's ready.
+5. Optionally tick columns in **Vs current** to draw the current state's
+   values alongside.
+6. If the status isn't `ready`, press **Include** and run the scenarios.
+7. Copy the token into a cell of the output or comparison template. Merge the
+   area you want the chart to fill.
+
+The chart redraws from the picked scenario's stored results every time the
+output sheet (or each comparison block) is built.
 
 ## Segment attribute tokens
 

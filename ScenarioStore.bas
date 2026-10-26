@@ -70,7 +70,23 @@ Public Type CalcGuard
     priorCalculation As XlCalculation
     priorEvents As Boolean
     priorScreen As Boolean
+    relockSheet As Worksheet  ' tblScenarios' sheet when the batch lifted its protection
     active As Boolean
+End Type
+
+' The user-editable metadata of one scenario: what frmScenarioEditor shows and saves.
+' The audit fields are read-only and ignored by UpdateScenarioDetails.
+Public Type ScenarioDetails
+    scenarioId As String     ' "" for a scenario not created yet
+    displayName As String
+    description As String
+    effectiveDate As Variant
+    includeInRun As Boolean
+    includeInCompare As Boolean
+    createdOn As Variant
+    createdBy As String
+    modifiedOn As Variant
+    modifiedBy As String
 End Type
  
 Public Const TBL_SCENARIOS As String = "tblScenarios"
@@ -238,11 +254,15 @@ Public Sub EnsureCurrentStateRow()
     Dim lo As ListObject
     Dim newRow As ListRow
     Dim currentId As String
+    Dim relock As Worksheet
 
     currentId = CurrentStateScenarioId()
     If ScenarioExists(currentId) Then Exit Sub
 
     Set lo = RequireTable(TBL_SCENARIOS)
+
+    Set relock = UnlockScenarioSheetIfLocked()
+    On Error GoTo Failed
 
     Set newRow = lo.ListRows.Add
     newRow.Range.Cells(1, RequireColumnIndex(lo, COL_SCENARIO_ID)).value = currentId
@@ -255,6 +275,13 @@ Public Sub EnsureCurrentStateRow()
     ' The current state is not a candidate for the regular run queue; it has its own.
     SetIfPresent lo, newRow, COL_INCLUDE, False
     SetIfPresent lo, newRow, COL_COMPARE, True
+
+    RelockScenarioSheet relock
+    Exit Sub
+
+Failed:
+    RelockScenarioSheet relock
+    Err.Raise Err.Number, "ScenarioStore.EnsureCurrentStateRow", Err.description
 End Sub
  
 Public Function ScenarioName(scenarioId As String) As String
@@ -297,6 +324,114 @@ Public Sub SetMetaValue(scenarioId As String, column As String, value As Variant
  
     CellInRow(lo, rowIndex, column).value = value
 End Sub
+
+Public Function ReadScenarioDetails(scenarioId As String) As ScenarioDetails
+    Dim lo As ListObject
+    Dim rowIndex As Long
+
+    Set lo = RequireTable(TBL_SCENARIOS)
+    rowIndex = FindRowIndex(lo, COL_SCENARIO_ID, scenarioId)
+    If rowIndex = 0 Then
+        Err.Raise vbObjectError + 611, "ScenarioStore", _
+                  "Scenario '" & scenarioId & "' was not found."
+    End If
+
+    With ReadScenarioDetails
+        .scenarioId = CStr(CellInRow(lo, rowIndex, COL_SCENARIO_ID).value)
+        .displayName = CStr(RowValue(lo, rowIndex, COL_NAME))
+        .description = CStr(RowValue(lo, rowIndex, COL_DESCRIPTION))
+        .effectiveDate = RowValue(lo, rowIndex, EffectiveDateColumn())
+        .includeInRun = IsTruthyValue(RowValue(lo, rowIndex, COL_INCLUDE))
+        .includeInCompare = IsTruthyValue(RowValue(lo, rowIndex, COL_COMPARE))
+        .createdOn = RowValue(lo, rowIndex, COL_CREATED_ON)
+        .createdBy = CStr(RowValue(lo, rowIndex, COL_CREATED_BY))
+        .modifiedOn = RowValue(lo, rowIndex, COL_MODIFIED_ON)
+        .modifiedBy = CStr(RowValue(lo, rowIndex, COL_MODIFIED_BY))
+    End With
+End Function
+
+' What is wrong with these details, or "" when they can be saved. A details block with
+' no scenarioId is checked as a new scenario.
+Public Function ScenarioDetailsProblem(details As ScenarioDetails) As String
+    Dim displayName As String
+
+    displayName = Trim$(details.displayName)
+    If Len(displayName) = 0 Then
+        ScenarioDetailsProblem = "Enter a name for the scenario."
+    ElseIf StrComp(displayName, CurrentStateScenarioName(), vbTextCompare) = 0 Then
+        ScenarioDetailsProblem = "'" & displayName & "' is reserved for the current-state row."
+    ElseIf Not NameIsAvailable(displayName, details.scenarioId) Then
+        ScenarioDetailsProblem = "A scenario named '" & displayName & "' already exists."
+    ElseIf Not IsDate(details.effectiveDate) Then
+        ScenarioDetailsProblem = "The effective date is blank or is not a date."
+    End If
+End Function
+
+' Writes the editable metadata back to tblScenarios. For the loaded scenario the
+' effective date is pushed to the model as well, or the next Save would copy the old
+' live date back over it.
+Public Sub UpdateScenarioDetails(details As ScenarioDetails)
+    Dim lo As ListObject
+    Dim target As ListRow
+    Dim problem As String
+    Dim guard As CalcGuard
+
+    If IsCurrentStateId(details.scenarioId) Then
+        Err.Raise vbObjectError + 619, "ScenarioStore", _
+                  "The current state row is reserved and cannot be edited."
+    End If
+
+    If Not ScenarioExists(details.scenarioId) Then
+        Err.Raise vbObjectError + 611, "ScenarioStore", _
+                  "Scenario '" & details.scenarioId & "' was not found."
+    End If
+
+    problem = ScenarioDetailsProblem(details)
+    If Len(problem) > 0 Then Err.Raise vbObjectError + 614, "ScenarioStore", problem
+
+    Set lo = RequireTable(TBL_SCENARIOS)
+
+    guard = BeginBatch("Updating " & ScenarioName(details.scenarioId))
+    On Error GoTo Failed
+
+    Set target = lo.ListRows(FindRowIndex(lo, COL_SCENARIO_ID, details.scenarioId))
+    SetIfPresent lo, target, COL_NAME, Trim$(details.displayName)
+    SetIfPresent lo, target, COL_DESCRIPTION, Trim$(details.description)
+    SetIfPresent lo, target, EffectiveDateColumn(), CDate(details.effectiveDate)
+    SetIfPresent lo, target, COL_INCLUDE, details.includeInRun
+    SetIfPresent lo, target, COL_COMPARE, details.includeInCompare
+    SetIfPresent lo, target, COL_MODIFIED_ON, Now
+    SetIfPresent lo, target, COL_MODIFIED_BY, Application.UserName
+
+    If StrComp(ActiveScenarioIdVal(), details.scenarioId, vbTextCompare) = 0 Then
+        ApplyScalars details.scenarioId
+        SetActiveIdentity details.scenarioId
+    End If
+
+    EndBatch guard
+    Exit Sub
+
+Failed:
+    EndBatch guard
+    Err.Raise Err.Number, "ScenarioStore.UpdateScenarioDetails", Err.description
+End Sub
+
+' True when a run has stored results for this scenario.
+Public Function HasStoredResults(scenarioId As String) As Boolean
+    Dim lo As ListObject
+
+    Set lo = TableOrNothing(ResultsTableName())
+    If lo Is Nothing Then Exit Function
+    HasStoredResults = (FindRowIndex(lo, COL_SCENARIO_ID, scenarioId) > 0)
+End Function
+
+' Empty when the table has no such column, so optional columns read as blank.
+Private Function RowValue(lo As ListObject, ByVal rowIndex As Long, column As String) As Variant
+    Dim col As Long
+
+    col = ColumnIndexOrZero(lo, column)
+    If col > 0 Then RowValue = lo.DataBodyRange.Cells(rowIndex, col).value
+End Function
  
 ' IDs in table order, or an empty array when there are none.
 Public Function ScenarioIds() As Variant
@@ -365,7 +500,9 @@ End Function
  
 ' Creates a scenario seeded from the templates and loads it. Returns the new ID.
 Public Function NewScenario(displayName As String, Optional description As String = "", _
-                            Optional effectiveDate As Variant = Empty) As String
+                            Optional effectiveDate As Variant = Empty, _
+                            Optional includeInRun As Boolean = True, _
+                            Optional includeInCompare As Boolean = True) As String
     Dim lo As ListObject
     Dim newRow As ListRow
     Dim scenarioId As String
@@ -398,9 +535,9 @@ Public Function NewScenario(displayName As String, Optional description As Strin
     SetIfPresent lo, newRow, COL_MODIFIED_ON, Now
     SetIfPresent lo, newRow, COL_CREATED_BY, Application.UserName
     SetIfPresent lo, newRow, COL_MODIFIED_BY, Application.UserName
-    SetIfPresent lo, newRow, COL_INCLUDE, True
-    SetIfPresent lo, newRow, COL_COMPARE, True
- 
+    SetIfPresent lo, newRow, COL_INCLUDE, includeInRun
+    SetIfPresent lo, newRow, COL_COMPARE, includeInCompare
+
     scalars = ScenarioScalars()
     For i = LBound(scalars) To UBound(scalars)
         SetIfPresent lo, newRow, scalars(i).column, DefaultScalar(scalars(i), effectiveDate)
@@ -473,15 +610,20 @@ Public Function SaveActiveScenarioAs(displayName As String, _
     Dim lo As ListObject
     Dim newRow As ListRow
     Dim scenarioId As String
- 
+    Dim relock As Worksheet
+
     If Not NameIsAvailable(displayName) Then
         Err.Raise vbObjectError + 612, "ScenarioStore", _
                   "A scenario named '" & displayName & "' already exists."
     End If
- 
+
     scenarioId = NextScenarioId()
     Set lo = RequireTable(TBL_SCENARIOS)
- 
+
+    ' Held across SaveTo too, whose own batch then finds the sheet already unlocked.
+    Set relock = UnlockScenarioSheetIfLocked()
+    On Error GoTo Failed
+
     Set newRow = lo.ListRows.Add
     newRow.Range.Cells(1, RequireColumnIndex(lo, COL_SCENARIO_ID)).value = scenarioId
     newRow.Range.Cells(1, RequireColumnIndex(lo, COL_NAME)).value = Trim$(displayName)
@@ -494,8 +636,14 @@ Public Function SaveActiveScenarioAs(displayName As String, _
  
     ' SaveTo lifts the scalars straight off the model, so the copy keeps the live values.
     SaveTo scenarioId
- 
+
+    RelockScenarioSheet relock
     SaveActiveScenarioAs = scenarioId
+    Exit Function
+
+Failed:
+    RelockScenarioSheet relock
+    Err.Raise Err.Number, "ScenarioStore.SaveActiveScenarioAs", Err.description
 End Function
  
 Private Sub SaveTo(scenarioId As String)
@@ -582,23 +730,6 @@ Public Sub DeleteScenario(scenarioId As String)
 Failed:
     EndBatch guard
     Err.Raise Err.Number, "ScenarioStore.DeleteScenario", Err.description
-End Sub
- 
-Public Sub RenameScenario(scenarioId As String, newName As String)
-    If IsCurrentStateId(scenarioId) Then
-        Err.Raise vbObjectError + 619, "ScenarioStore", _
-                  "The current state row is reserved and cannot be renamed."
-    End If
-
-    If Not NameIsAvailable(newName, scenarioId) Then
-        Err.Raise vbObjectError + 614, "ScenarioStore", _
-                  "A scenario named '" & newName & "' already exists."
-    End If
- 
-    SetMetaValue scenarioId, COL_NAME, Trim$(newName)
-    SetMetaValue scenarioId, COL_MODIFIED_ON, Now
-    SetMetaValue scenarioId, COL_MODIFIED_BY, Application.UserName
-    If StrComp(ActiveScenarioIdVal(), scenarioId, vbTextCompare) = 0 Then SetActiveIdentity scenarioId
 End Sub
  
 '=======================================================================================
@@ -836,11 +967,16 @@ End Sub
  
 ' Scenario swaps touch thousands of cells; recalculating or firing change events on each
 ' one would be unusably slow and would trip the dirty flag on every write.
+'
+' The batch also lifts the read-only lock on tblScenarios' sheet, since a protected sheet
+' refuses to resize any table on it. A nested batch finds the sheet already unlocked and
+' leaves the relock to the outer one.
 Public Function BeginBatch(Optional status As String = "") As CalcGuard
     With BeginBatch
         .priorCalculation = Application.Calculation
         .priorEvents = Application.EnableEvents
         .priorScreen = Application.ScreenUpdating
+        Set .relockSheet = UnlockScenarioSheetIfLocked()
         .active = True
     End With
  
@@ -852,7 +988,10 @@ End Function
  
 Public Sub EndBatch(guard As CalcGuard)
     If Not guard.active Then Exit Sub
- 
+
+    RelockScenarioSheet guard.relockSheet
+    Set guard.relockSheet = Nothing
+
     Application.StatusBar = False
     Application.EnableEvents = guard.priorEvents
     Application.ScreenUpdating = guard.priorScreen
