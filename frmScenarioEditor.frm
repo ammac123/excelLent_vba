@@ -110,7 +110,7 @@ End Sub
 Private Sub UserForm_Initialize()
     ' Set at runtime because the VBE designer rescales sizes under Windows display
     ' scaling. ArrangeControls sets the height once it knows which rows are showing.
-    Me.Width = FIELD_LEFT + FIELD_WIDTH + MARGIN + (Me.Width - Me.InsideWidth)
+    Me.Width = FIELD_LEFT + FIELD_WIDTH + (MARGIN * 2)
     BuildControls
 End Sub
 
