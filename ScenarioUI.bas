@@ -6,9 +6,15 @@ Option Explicit
 '
 ' Assign one macro per button. The picker is the cell named scenarioPicker, validated
 ' against scenarioPickerList on 99_Lookup: every scenario except the current state.
+'
+' The price setting inputs sheet has a second picker, inputScenarioPicker, over the same
+' list. It always shows the loaded scenario, and choosing another loads it straight away
+' (see HandleInputScenarioPickerChange). The manager's picker only says what Load, Edit
+' and Delete act on, so changing it loads nothing.
 
 Private Const MANAGER_SHEET As String = "04_SCN_Manager"
 Private Const NAME_PICKER As String = "scenarioPicker"
+Private Const NAME_INPUT_PICKER As String = "inputScenarioPicker"
 Private Const LOOKUP_SHEET As String = "99_Lookups"
 Private Const NAME_PICKER_ANCHOR As String = "scenarioPickerListAnchor"
 Private Const NAME_PICKER_LIST As String = "scenarioPickerList"
@@ -122,6 +128,88 @@ Failed:
     ReportFailure "open the scenario editor"
 End Function
 
+' For Worksheet_Change on the price setting inputs sheet. Picking a scenario in
+' inputScenarioPicker loads it, asking first what to do with unsaved edits; anything
+' that isn't a usable pick puts the loaded scenario's name back. Returns True when the
+' change was the picker's alone, so the sheet can skip its own dirty check.
+Public Function HandleInputScenarioPickerChange(target As Range) As Boolean
+    Dim cell As Range
+    Dim scenarioId As String
+
+    Set cell = NamedRangeOrNothing(NAME_INPUT_PICKER)
+    If cell Is Nothing Then Exit Function
+    If Not target.Worksheet Is cell.Worksheet Then Exit Function
+    Set cell = cell.Cells(1).MergeArea
+    If Application.Intersect(target, cell) Is Nothing Then Exit Function
+
+    ' A paste or clear that also covers other cells is never a pick. Put the name back
+    ' and leave the rest of the change to the sheet's own handling.
+    If Application.Intersect(target, cell).Cells.CountLarge < target.Cells.CountLarge Then
+        WritePickerQuietly NAME_INPUT_PICKER, ActiveScenarioNameVal()
+        Exit Function
+    End If
+
+    HandleInputScenarioPickerChange = True
+    On Error GoTo Failed
+
+    scenarioId = ScenarioIdForName(Trim$(CStr(cell.Cells(1).value)))
+    If Len(scenarioId) = 0 Or IsCurrentStateId(scenarioId) Then GoTo PutBack
+    ' Picking the loaded one changes nothing, but a typed name may differ in case.
+    If StrComp(scenarioId, ActiveScenarioIdVal(), vbTextCompare) = 0 Then GoTo PutBack
+
+    If Not ResolveUnsavedBeforeSwitch(ScenarioName(scenarioId)) Then GoTo PutBack
+
+    LoadScenario scenarioId
+    Application.CalculateFull
+    ' The manager's picker follows, so its Edit and Delete act on what is now loaded.
+    WritePickerQuietly NAME_PICKER, ScenarioName(scenarioId)
+    RefreshScenarioManager
+    Exit Function
+
+PutBack:
+    WritePickerQuietly NAME_INPUT_PICKER, ActiveScenarioNameVal()
+    Exit Function
+
+Failed:
+    ReportFailure "load the scenario"
+    WritePickerQuietly NAME_INPUT_PICKER, ActiveScenarioNameVal()
+End Function
+
+' Before switching away from a scenario with unsaved edits: Yes saves them, No discards
+' them, Cancel stays put. Returns False to stay put. When the loaded scenario has been
+' deleted there is nothing to save to, so it falls back to the plain discard prompt.
+Private Function ResolveUnsavedBeforeSwitch(targetName As String) As Boolean
+    Dim activeName As String
+    Dim problem As String
+
+    If Not ActiveIsDirty() Then
+        ResolveUnsavedBeforeSwitch = True
+        Exit Function
+    End If
+
+    If Len(ActiveScenarioIdVal()) = 0 Then
+        ResolveUnsavedBeforeSwitch = ConfirmDiscardIfDirty("Load '" & targetName & "'")
+        Exit Function
+    End If
+
+    activeName = ActiveScenarioNameVal()
+    Select Case MsgBox("'" & activeName & "' has unsaved changes." & vbNewLine & vbNewLine & _
+                       "Yes: save them, then load '" & targetName & "'." & vbNewLine & _
+                       "No: discard them and load '" & targetName & "'." & vbNewLine & _
+                       "Cancel: stay on '" & activeName & "'.", _
+                       vbYesNoCancel + vbExclamation + vbDefaultButton3, "Unsaved Changes")
+        Case vbYes
+            If Not TrySaveActive(problem) Then
+                MsgBox "'" & activeName & "' cannot be saved yet, so it is still loaded:" & _
+                       vbNewLine & vbNewLine & problem, vbExclamation
+                Exit Function
+            End If
+            ResolveUnsavedBeforeSwitch = True
+        Case vbNo
+            ResolveUnsavedBeforeSwitch = True
+    End Select
+End Function
+
 ' What a new scenario starts with in the editor.
 Public Function NewScenarioDefaults() As ScenarioDetails
     With NewScenarioDefaults
@@ -198,13 +286,11 @@ Public Sub SaveScenarioButton()
         Exit Sub
     End If
 
-    If Not ActiveScenarioIsValid(problem) Then
+    If Not TrySaveActive(problem) Then
         MsgBox "This scenario cannot be saved yet:" & vbNewLine & vbNewLine & problem, vbExclamation
         Exit Sub
     End If
 
-    SaveActiveScenario
-    LastValidatedOn(scenarioId) = Now
     RefreshScenarioManager
 
     MsgBox "Saved '" & ScenarioName(scenarioId) & "'.", vbInformation
@@ -213,6 +299,16 @@ Public Sub SaveScenarioButton()
 Failed:
     ReportFailure "save the scenario"
 End Sub
+
+' Validates and saves the loaded scenario, with no messages of its own. Returns False
+' and fills problem when the inputs aren't valid yet.
+Private Function TrySaveActive(ByRef problem As String) As Boolean
+    If Not ActiveScenarioIsValid(problem) Then Exit Function
+
+    SaveActiveScenario
+    LastValidatedOn(ActiveScenarioIdVal()) = Now
+    TrySaveActive = True
+End Function
 
 Public Sub SaveScenarioAsButton()
     Dim displayName As String
@@ -532,22 +628,26 @@ Public Sub RefreshScenarioManager()
     Set cell = NamedRangeOrNothing(NAME_STATUS)
     If Not cell Is Nothing Then cell.value = StatusText(scenarioId)
 
-    RefreshScenarioPicker
+    RefreshScenarioPicker NAME_PICKER
+    RefreshScenarioPicker NAME_INPUT_PICKER
+    ' Only the input sheet's picker tracks the loaded scenario. The manager's keeps
+    ' whatever the user chose, since Edit and Delete act on it.
+    WritePickerQuietly NAME_INPUT_PICKER, ActiveScenarioNameVal()
     RefreshOutputScenarioPicker
 End Sub
 
-' Points the picker's dropdown at the helper list on the lookup sheet: a live FILTER
+' Points a picker's dropdown at the helper list on the lookup sheet: a live FILTER
 ' over tblScenarios that leaves out the current state, which can't be loaded, saved,
 ' renamed or deleted. The list keeps itself up to date, so this only does work the
 ' first time, or when the helper or the picker's validation has gone missing.
-Private Sub RefreshScenarioPicker()
+Private Sub RefreshScenarioPicker(nameRef As String)
     Dim cell As Range
     Dim source As String
     Dim relock As Worksheet
     Dim promptTitle As String, promptText As String
     Dim current As String
 
-    Set cell = NamedRangeOrNothing(NAME_PICKER)
+    Set cell = NamedRangeOrNothing(nameRef)
     If cell Is Nothing Then Exit Sub
 
     EnsureScenarioPickerList
@@ -561,8 +661,8 @@ Private Sub RefreshScenarioPicker()
     On Error GoTo 0
     If StrComp(current, source, vbTextCompare) = 0 Then Exit Sub
 
-    ' Validation can't be changed on a protected sheet, and the picker shares the
-    ' manager sheet with tblScenarios.
+    ' Validation can't be changed on a protected sheet, and the manager's picker shares
+    ' its sheet with tblScenarios.
     Set relock = UnlockScenarioSheetIfLocked()
     On Error GoTo Failed
 
@@ -726,10 +826,9 @@ Private Function DefaultEditScenarioId() As String
 End Function
 
 ' Pickers hold scenario names, so after a rename one still showing the old name would
-' point at nothing. Events are held off so the write doesn't count as the user picking.
+' point at nothing.
 Private Sub RepointPicker(nameRef As String, oldName As String, newName As String)
     Dim cell As Range
-    Dim priorEvents As Boolean
 
     If StrComp(oldName, newName, vbBinaryCompare) = 0 Then Exit Sub
 
@@ -737,9 +836,23 @@ Private Sub RepointPicker(nameRef As String, oldName As String, newName As Strin
     If cell Is Nothing Then Exit Sub
     If StrComp(Trim$(CStr(cell.value)), oldName, vbTextCompare) <> 0 Then Exit Sub
 
+    WritePickerQuietly nameRef, newName
+End Sub
+
+' Sets a picker's value with events held off, so the write doesn't count as the user
+' picking. A missing picker, or one already showing the value, is left alone.
+Private Sub WritePickerQuietly(nameRef As String, value As String)
+    Dim cell As Range
+    Dim priorEvents As Boolean
+
+    Set cell = NamedRangeOrNothing(nameRef)
+    If cell Is Nothing Then Exit Sub
+    Set cell = cell.Cells(1)
+    If StrComp(CStr(cell.value), value, vbBinaryCompare) = 0 Then Exit Sub
+
     priorEvents = Application.EnableEvents
     Application.EnableEvents = False
-    cell.value = newName
+    cell.value = value
     Application.EnableEvents = priorEvents
 End Sub
 
