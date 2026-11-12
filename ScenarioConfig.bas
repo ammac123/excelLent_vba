@@ -301,10 +301,11 @@ End Function
 ' per build (for the picked scenario), so templates can be larger and richer than the
 ' comparison ones.
 Public Function ScenarioOutputTemplates() As CompareTemplateSpec()
-    Dim templates(1 To 2) As CompareTemplateSpec
+    Dim templates(1 To 3) As CompareTemplateSpec
 
     templates(1) = MakeCompareTemplate("Scenario detail", "outputTemplateDetail")
     templates(2) = MakeCompareTemplate("Executive summary", "outputTemplateExec")
+    templates(3) = MakeCompareTemplate("Recent application summary", "outputTemplateCurrentApplications")
 
     ScenarioOutputTemplates = templates
 End Function
