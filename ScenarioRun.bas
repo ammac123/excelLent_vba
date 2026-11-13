@@ -294,10 +294,14 @@ Private Sub StoreResults(scenarioId As String, metrics As Variant)
     Next i
 
     With lo.DataBodyRange
+        ' Growing the table copies the previous row's formats down, so the column ends up
+        ' with whatever the last metric used (e.g. currency). The column mixes currencies,
+        ' percentages and counts, so reset it to General before writing the values.
+        .Columns(cValue).NumberFormat = "General"
         .Cells(startRow + 1, cId).Resize(n, 1).value = idCol
         .Cells(startRow + 1, cRun).Resize(n, 1).value = runCol
         .Cells(startRow + 1, cMetric).Resize(n, 1).value = metricCol
-        .Cells(startRow + 1, cValue).Resize(n, 1).value = valueCol
+        .Cells(startRow + 1, cValue).Resize(n, 1).Value2 = valueCol
     End With
 End Sub
 ' === PERF PATCH 2026-10-18 #1 StoreResults bulk write === END

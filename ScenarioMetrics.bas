@@ -686,7 +686,7 @@ Private Function ReadOne(spec As MetricSpec, rowMaps As Object, colMaps As Objec
 
     If Len(spec.sourceTable) = 0 Then
         Set cell = NamedRangeOrNothing(spec.nameRef)
-        If cell Is Nothing Then ReadOne = ERR_NO_NAME Else ReadOne = cell.Cells(1, 1).value
+        If cell Is Nothing Then ReadOne = ERR_NO_NAME Else ReadOne = cell.Cells(1, 1).Value2
         Exit Function
     End If
 
@@ -708,7 +708,8 @@ Private Function ReadOne(spec As MetricSpec, rowMaps As Object, colMaps As Objec
         Exit Function
     End If
 
-    ReadOne = lo.DataBodyRange.Cells(rowIndex, colIndex).value
+    ' Value2: .Value hands back Currency (4 dp) for currency-formatted cells.
+    ReadOne = lo.DataBodyRange.Cells(rowIndex, colIndex).Value2
 End Function
 
 Private Function CachedTable(tableName As String, tableMaps As Object) As ListObject
